@@ -1,11 +1,10 @@
 """
-SOVEREIGN APEX — SSUL-TUBE FACTORY (v46.2 SYNTAX & STABILITY MASTER)
+SOVEREIGN APEX — SSUL-TUBE FACTORY (v47 DIAGNOSTIC & STABILITY)
 =====================================
 통합 적용:
-  1. 렌더링 모듈 (render_final_video) try-except 문법 오류 및 들여쓰기 완벽 수정.
+  1. Diagnostic Engine: 서버 즉사 방지 및 누락된 환경변수 웹 화면 출력 기능 탑재.
   2. Concurrency Isolation: UUID 기반 세션 폴더 분리.
   3. LLM Fault-Tolerance: 백오프 기반 3회 재시도 자동화.
-  4. Strict Env Validation: API Key 누락 시 즉각 시스템 중단.
 """
 
 import os, json, asyncio, logging, httpx, html, re, time, random, uuid, shutil
@@ -41,16 +40,21 @@ from googleapiclient.http import MediaFileUpload
 from google.oauth2.credentials import Credentials
 
 # ============================================================
-# 0. 환경 변수 엄격한 검증
+# 0. 환경 변수 진단 엔진 (서버 즉사 방지)
 # ============================================================
 logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger("SSULTUBE-PROD-v46.2")
+logger = logging.getLogger("SSULTUBE-PROD-v47")
 
-def get_env_strict(k: str) -> str:
+app = FastAPI()
+
+# 💡 누락된 변수를 기록할 리스트
+MISSING_KEYS = []
+
+def get_env_safe(k: str) -> str:
     v = os.environ.get(k)
     if not v:
-        logger.critical(f"🛑 FATAL ERROR: 환경변수 '{k}' 누락. 시스템을 중단합니다.")
-        raise ValueError(f"Missing required environment variable: {k}")
+        MISSING_KEYS.append(k)
+        return ""
     return v
 
 LITELLM_GPT        = "openai/gpt-5.4"
@@ -59,17 +63,23 @@ LITELLM_GEMINI     = "gemini/gemini-3.1-pro"
 LITELLM_PERPLEXITY = "perplexity/sonar-pro"
 
 litellm.set_verbose = False
-os.environ["OPENAI_API_KEY"]     = get_env_strict("OPENAI_API_KEY")
-os.environ["ANTHROPIC_API_KEY"]  = get_env_strict("ANTHROPIC_API_KEY")
-os.environ["GEMINI_API_KEY"]     = get_env_strict("GEMINI_API_KEY")
-os.environ["PERPLEXITY_API_KEY"] = get_env_strict("PERPLEXITY_API_KEY")
-TELEGRAM_TOKEN                   = get_env_strict("TELEGRAM_TOKEN")
-ALLOWED_IDS_STR                  = get_env_strict("ALLOWED_USER_ID")
+os.environ["OPENAI_API_KEY"]     = get_env_safe("OPENAI_API_KEY")
+os.environ["ANTHROPIC_API_KEY"]  = get_env_safe("ANTHROPIC_API_KEY")
+os.environ["GEMINI_API_KEY"]     = get_env_safe("GEMINI_API_KEY")
+os.environ["PERPLEXITY_API_KEY"] = get_env_safe("PERPLEXITY_API_KEY")
+TELEGRAM_TOKEN                   = get_env_safe("TELEGRAM_TOKEN")
+ALLOWED_IDS_STR                  = get_env_safe("ALLOWED_USER_ID")
 
-bot = Bot(token=TELEGRAM_TOKEN)
-app = FastAPI()
-ALLOWED_IDS = [int(x) for x in ALLOWED_IDS_STR.split(",")]
-openai_client = AsyncOpenAI(api_key=os.environ["OPENAI_API_KEY"])
+try:
+    ALLOWED_IDS = [int(x) for x in ALLOWED_IDS_STR.split(",")] if ALLOWED_IDS_STR else []
+except:
+    ALLOWED_IDS = []
+    if "ALLOWED_USER_ID" not in MISSING_KEYS:
+        MISSING_KEYS.append("ALLOWED_USER_ID (숫자 형식이 아닙니다)")
+
+# 봇과 클라이언트도 에러 없이 유연하게 초기화
+bot = Bot(token=TELEGRAM_TOKEN) if TELEGRAM_TOKEN else None
+openai_client = AsyncOpenAI(api_key=os.environ["OPENAI_API_KEY"]) if os.environ["OPENAI_API_KEY"] else None
 
 if Langfuse and os.environ.get("LANGFUSE_PUBLIC_KEY"):
     langfuse = Langfuse(public_key=os.environ["LANGFUSE_PUBLIC_KEY"], secret_key=os.environ["LANGFUSE_SECRET_KEY"], host="https://cloud.langfuse.com")
@@ -79,6 +89,19 @@ HARNESS_CONTEXT = """[SSUL-TUBE HARNESS SYSTEM CORE RULES]
 2. 시각적 일관성: image_prompt에 "Korean webtoon style, dramatic shading" 유지.
 3. 훅(Hook) 강제: 1번 씬은 무조건 가장 자극적인 3초 이내의 결론/반전 스포일러로 배치.
 4. 순수 JSON 포맷 강제 (마크다운 금지)."""
+
+# ============================================================
+# 0-1. 💡 웹 진단 페이지 (에러 확인용)
+# ============================================================
+@app.get("/")
+async def health_check():
+    if MISSING_KEYS:
+        return {
+            "status": "FAIL", 
+            "message": "서버는 정상 구동되었으나, 아래의 환경 변수(API 키 등)가 구글 클라우드에 세팅되지 않았습니다.", 
+            "missing_variables": MISSING_KEYS
+        }
+    return {"status": "SUCCESS", "message": "모든 세팅이 완벽합니다. 텔레그램에서 /auto 명령어를 내려주십시오."}
 
 # ============================================================
 # 1. 스키마 및 State
@@ -231,7 +254,7 @@ async def generate_openai_tts(text: str, file_path: str) -> str:
     return ""
 
 # ============================================================
-# 4. 렌더링 엔진 (try-except 블록 무결성 보장)
+# 4. 렌더링 엔진 
 # ============================================================
 def create_zoom_effect(clip, duration, mode="in", zoom_ratio=0.05):
     def effect(get_frame, t):
@@ -301,6 +324,10 @@ def upload_to_youtube(video_path: str, thumb_path: str, title: str, tags: list) 
 # 6. 메인 컨트롤러
 # ============================================================
 async def run_factory_pipeline(chat_id: int, keyword: Optional[str] = None):
+    if not bot:
+        logger.error("텔레그램 토큰이 없어 메시지를 보낼 수 없습니다.")
+        return
+
     session_id = uuid.uuid4().hex[:8]
     work_dir = f"temp_{session_id}"
     os.makedirs(work_dir, exist_ok=True)
@@ -331,7 +358,7 @@ async def run_factory_pipeline(chat_id: int, keyword: Optional[str] = None):
                 await bot.send_message(chat_id, f"✅ 영상/썸네일 업로드 완료. (세션: {session_id})")
                 
     except Exception as e:
-        await bot.send_message(chat_id, f"⚠️ 공장 셧다운: {html.escape(str(e))}")
+        if bot: await bot.send_message(chat_id, f"⚠️ 공장 셧다운: {html.escape(str(e))}")
     finally:
         try:
             if os.path.exists(work_dir): shutil.rmtree(work_dir)
@@ -341,7 +368,7 @@ async def run_factory_pipeline(chat_id: int, keyword: Optional[str] = None):
 @app.post("/webhook")
 async def webhook(request: Request, bg: BackgroundTasks):
     msg = Update.de_json(await request.json(), bot).message
-    if msg and (msg.from_user.id in ALLOWED_IDS) and msg.text:
+    if bot and msg and (msg.from_user.id in ALLOWED_IDS) and msg.text:
         if msg.text.startswith("/make "): bg.add_task(run_factory_pipeline, msg.chat.id, msg.text.replace("/make ", "").strip())
         elif msg.text == "/auto": bg.add_task(run_factory_pipeline, msg.chat.id)
     return {"ok": True}
