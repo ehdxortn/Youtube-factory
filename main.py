@@ -1,12 +1,7 @@
 """
 SOVEREIGN APEX — SSUL-TUBE FACTORY (v47 DIAGNOSTIC & STABILITY)
 =====================================
-통합 적용:
-  1. Diagnostic Engine: 서버 즉사 방지 및 누락된 환경변수 웹 화면 출력 기능 탑재.
-  2. Concurrency Isolation: UUID 기반 세션 폴더 분리.
-  3. LLM Fault-Tolerance: 백오프 기반 3회 재시도 자동화.
 """
-
 import os, json, asyncio, logging, httpx, html, re, time, random, uuid, shutil
 from datetime import datetime, timezone
 from typing import Optional, List, Literal, TypedDict
@@ -46,8 +41,6 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("SSULTUBE-PROD-v47")
 
 app = FastAPI()
-
-# 💡 누락된 변수를 기록할 리스트
 MISSING_KEYS = []
 
 def get_env_safe(k: str) -> str:
@@ -74,10 +67,8 @@ try:
     ALLOWED_IDS = [int(x) for x in ALLOWED_IDS_STR.split(",")] if ALLOWED_IDS_STR else []
 except:
     ALLOWED_IDS = []
-    if "ALLOWED_USER_ID" not in MISSING_KEYS:
-        MISSING_KEYS.append("ALLOWED_USER_ID (숫자 형식이 아닙니다)")
+    if "ALLOWED_USER_ID" not in MISSING_KEYS: MISSING_KEYS.append("ALLOWED_USER_ID (숫자 형식이 아닙니다)")
 
-# 봇과 클라이언트도 에러 없이 유연하게 초기화
 bot = Bot(token=TELEGRAM_TOKEN) if TELEGRAM_TOKEN else None
 openai_client = AsyncOpenAI(api_key=os.environ["OPENAI_API_KEY"]) if os.environ["OPENAI_API_KEY"] else None
 
@@ -87,20 +78,16 @@ if Langfuse and os.environ.get("LANGFUSE_PUBLIC_KEY"):
 HARNESS_CONTEXT = """[SSUL-TUBE HARNESS SYSTEM CORE RULES]
 1. 비식별화 및 검열 우회 100% 적용.
 2. 시각적 일관성: image_prompt에 "Korean webtoon style, dramatic shading" 유지.
-3. 훅(Hook) 강제: 1번 씬은 무조건 가장 자극적인 3초 이내의 결론/반전 스포일러로 배치.
+3. 훅 강제: 1번 씬은 무조건 가장 자극적인 3초 이내의 결론/반전 스포일러.
 4. 순수 JSON 포맷 강제 (마크다운 금지)."""
 
 # ============================================================
-# 0-1. 💡 웹 진단 페이지 (에러 확인용)
+# 0-1. 웹 진단 페이지
 # ============================================================
 @app.get("/")
 async def health_check():
     if MISSING_KEYS:
-        return {
-            "status": "FAIL", 
-            "message": "서버는 정상 구동되었으나, 아래의 환경 변수(API 키 등)가 구글 클라우드에 세팅되지 않았습니다.", 
-            "missing_variables": MISSING_KEYS
-        }
+        return {"status": "FAIL", "message": "API 키 누락", "missing_variables": MISSING_KEYS}
     return {"status": "SUCCESS", "message": "모든 세팅이 완벽합니다. 텔레그램에서 /auto 명령어를 내려주십시오."}
 
 # ============================================================
@@ -141,7 +128,7 @@ def safe_json_extract(text: str) -> Optional[dict]:
     return None
 
 # ============================================================
-# 2. 장애 허용 LLM 호출 및 노드
+# 2. 노드 파이프라인
 # ============================================================
 @observe(name="factory_llm_call")
 async def llm_call(model: str, system: str, payload: str, temp: float = 0.7, tokens: int = 2500) -> str:
@@ -150,7 +137,7 @@ async def llm_call(model: str, system: str, payload: str, temp: float = 0.7, tok
             res = await acompletion(model=model, messages=[{"role": "system", "content": system}, {"role": "user", "content": payload}], temperature=temp, max_tokens=tokens, request_timeout=60)
             return res.choices[0].message.content
         except Exception as e:
-            logger.warning(f"⚠️ {model} 통신 실패 (시도 {attempt+1}/3). 딜레이 후 재시도... 에러: {e}")
+            logger.warning(f"⚠️ {model} 통신 실패 (시도 {attempt+1}/3). 에러: {e}")
             if attempt == 2: raise e
             await asyncio.sleep(2 * (attempt + 1))
     return ""
@@ -201,7 +188,6 @@ async def node_pd_harness(state: FactoryState) -> FactoryState:
     if state.get("error"): return state
     sys_prompt = f"{HARNESS_CONTEXT}\n대본을 영상 렌더링용 JSON 구조화.\n스키마: title, seo_tags, thumbnail_prompt, scenes (scene_no, tts_text, subtitle, image_prompt, zoom_mode)"
     payload = f"대본: {state['safe_script']}"
-    
     for _ in range(3):
         try:
             parsed = safe_json_extract(await llm_call(LITELLM_GEMINI, sys_prompt, payload, 0.1, 2000))
@@ -239,7 +225,6 @@ async def generate_dalle_image(prompt: str, file_path: str) -> str:
                 with open(file_path, 'wb') as f: f.write((await c.get(res.data[0].url)).content)
             return file_path
         except Exception as e:
-            if attempt == 1: logger.error(f"DALL-E 에러: {e}")
             await asyncio.sleep(2)
     return ""
 
@@ -249,12 +234,11 @@ async def generate_openai_tts(text: str, file_path: str) -> str:
             (await openai_client.audio.speech.create(model="tts-1", voice="onyx", input=text)).stream_to_file(file_path)
             return file_path
         except Exception as e:
-            if attempt == 1: logger.error(f"TTS 에러: {e}")
             await asyncio.sleep(2)
     return ""
 
 # ============================================================
-# 4. 렌더링 엔진 
+# 4. 렌더링 엔진 (try-except 완벽 복구)
 # ============================================================
 def create_zoom_effect(clip, duration, mode="in", zoom_ratio=0.05):
     def effect(get_frame, t):
@@ -288,7 +272,6 @@ def render_final_video(blueprint: dict, img_paths: list, audio_paths: list, out_
             clips.append(video_comp)
             
         final_video = concatenate_videoclips(clips, method="compose")
-        
         bgm_path = "bgm_tense.mp3"
         if os.path.exists(bgm_path):
             bgm = AudioFileClip(bgm_path).fx(afx.volumex, random.uniform(0.06, 0.1)).fx(afx.audio_loop, duration=final_video.duration)
@@ -296,7 +279,6 @@ def render_final_video(blueprint: dict, img_paths: list, audio_paths: list, out_
 
         final_video.write_videofile(out_name, fps=24, codec="libx264", audio_codec="aac", threads=4, logger=None)
         return out_name
-
     except Exception as e:
         logging.error(f"❌ 영상 렌더링 실패: {e}")
         return ""
@@ -305,14 +287,12 @@ def render_final_video(blueprint: dict, img_paths: list, audio_paths: list, out_
 # 5. 유튜브 직배송
 # ============================================================
 def upload_to_youtube(video_path: str, thumb_path: str, title: str, tags: list) -> bool:
-    if not os.path.exists('token.json'): return False
+    if not os.path.exists('client_secrets.json'): return False
     try:
-        creds = Credentials.from_authorized_user_file('token.json', ['https://www.googleapis.com/auth/youtube.upload'])
+        creds = Credentials.from_authorized_user_file('client_secrets.json', ['https://www.googleapis.com/auth/youtube.upload'])
         youtube = build('youtube', 'v3', credentials=creds)
         body = {'snippet': {'title': title, 'description': "실화 바탕 썰다큐입니다.\n#사건사고 #썰튜브", 'tags': tags, 'categoryId': '24'}, 'status': {'privacyStatus': 'public'}}
-        
         video_id = youtube.videos().insert(part=','.join(body.keys()), body=body, media_body=MediaFileUpload(video_path, chunksize=-1, resumable=True, mimetype='video/mp4')).execute().get("id")
-        
         if video_id and os.path.exists(thumb_path):
             youtube.thumbnails().set(videoId=video_id, media_body=MediaFileUpload(thumb_path)).execute()
         return True
@@ -324,10 +304,7 @@ def upload_to_youtube(video_path: str, thumb_path: str, title: str, tags: list) 
 # 6. 메인 컨트롤러
 # ============================================================
 async def run_factory_pipeline(chat_id: int, keyword: Optional[str] = None):
-    if not bot:
-        logger.error("텔레그램 토큰이 없어 메시지를 보낼 수 없습니다.")
-        return
-
+    if not bot: return
     session_id = uuid.uuid4().hex[:8]
     work_dir = f"temp_{session_id}"
     os.makedirs(work_dir, exist_ok=True)
@@ -337,7 +314,6 @@ async def run_factory_pipeline(chat_id: int, keyword: Optional[str] = None):
         state = await PIPELINE.ainvoke({"chat_id": chat_id, "session_id": session_id, "keyword": keyword, "character": None, "facts": None, "raw_script": None, "safe_script": None, "blueprint": None, "error": None, "agent_status": {}})
         
         if state.get("error"): return await bot.send_message(chat_id, f"⚠️ 에러: {state['error']}")
-        
         bp = state["blueprint"]
         await bot.send_message(chat_id, f"✅ 기획 완료. 렌더링 진입.\n제목: {bp.get('title')}\n페르소나: {state['character']}")
 
@@ -356,13 +332,11 @@ async def run_factory_pipeline(chat_id: int, keyword: Optional[str] = None):
             await bot.send_message(chat_id, "🚀 렌더링 완료. 유튜브 서버 배송 및 썸네일 부착 중...")
             if upload_to_youtube(out_path, thumb_path, bp.get("title"), bp.get("seo_tags", [])):
                 await bot.send_message(chat_id, f"✅ 영상/썸네일 업로드 완료. (세션: {session_id})")
-                
     except Exception as e:
         if bot: await bot.send_message(chat_id, f"⚠️ 공장 셧다운: {html.escape(str(e))}")
     finally:
         try:
             if os.path.exists(work_dir): shutil.rmtree(work_dir)
-            logging.info(f"🧹 세션 {session_id} 가비지 정리 완료.")
         except: pass
 
 @app.post("/webhook")
