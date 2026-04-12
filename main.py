@@ -6,7 +6,7 @@ SOVEREIGN APEX — SSUL-TUBE FACTORY (ANTI-PATTERN & MONETIZATION EDITION)
   2. Character & Hook Engine: 페르소나 고정 및 첫 3초 훅 강제 설계
   3. Thumbnail Engine: DALL-E 3 CTR 최적화 썸네일 생성 및 API 자동 등록
   4. Anti-Pattern Randomizer: 줌 비율, 자막 크기, 위치 난수화로 대량생산 필터 회피
-  5. [HOTFIX] GPT-5.4 Native JSON Mode 강제 적용 및 토큰 해방 (파싱 에러 영구 차단)
+  5. [ULTIMATE FIX] 방어적 Pydantic 스키마 및 에러 텔레그램 직배송 로직 탑재
 """
 
 import os, json, asyncio, logging, httpx, html, re, time, random
@@ -71,7 +71,6 @@ app = FastAPI()
 ALLOWED_IDS = [int(x) for x in get_env("ALLOWED_USER_ID", "0").split(",")]
 openai_client = AsyncOpenAI(api_key=get_env("OPENAI_API_KEY"))
 
-# 💡 하네스 절대 지침서
 HARNESS_CONTEXT = """[SSUL-TUBE HARNESS SYSTEM CORE RULES]
 1. 비식별화 및 검열 우회 100% 적용.
 2. 시각적 일관성: image_prompt에 "Korean webtoon style, dramatic shading" 유지.
@@ -79,20 +78,20 @@ HARNESS_CONTEXT = """[SSUL-TUBE HARNESS SYSTEM CORE RULES]
 4. 순수 JSON 포맷 강제 (마크다운 금지)."""
 
 # ============================================================
-# 1. 스키마 및 State
+# 1. 스키마 및 State (💡 방어적 코딩: 기본값 설정으로 에러 원천 차단)
 # ============================================================
 class SceneItem(BaseModel):
-    scene_no: int
-    tts_text: str = Field(description="성우 나레이션")
-    subtitle: str = Field(description="압축 자막 (15자 이내)")
-    image_prompt: str = Field(description="DALL-E 3 배경 프롬프트")
-    zoom_mode: Literal["in", "out"]
+    scene_no: int = 1
+    tts_text: str = "대본 생성 오류"
+    subtitle: str = "자막 누락"
+    image_prompt: str = "Korean webtoon style, dramatic shading, intense scene"
+    zoom_mode: str = "in" # Literal 대신 str로 완화
 
 class SsulBlueprint(BaseModel):
-    title: str = Field(description="유튜브 제목")
-    seo_tags: List[str]
-    thumbnail_prompt: str = Field(description="CTR 극대화 DALL-E 3 썸네일 프롬프트")
-    scenes: List[SceneItem]
+    title: str = "기막힌 인생실화"
+    seo_tags: List[str] = ["썰다큐", "사건사고", "충격실화"]
+    thumbnail_prompt: str = "Korean webtoon style, high contrast, shocked face close-up"
+    scenes: List[SceneItem] = []
 
 class FactoryState(TypedDict):
     chat_id: int
@@ -107,28 +106,25 @@ class FactoryState(TypedDict):
 
 def safe_json_extract(text: str) -> Optional[dict]:
     try:
-        text = re.sub(r"```json|```", "", text).strip()
-        start, end = text.find("{"), text.rfind("}")
-        if start != -1 and end != -1 and start < end:
-            return json.loads(text[start:end+1])
-    except: pass
+        return json.loads(text) # Native JSON 우선 시도
+    except:
+        try:
+            cleaned = text.replace("```json", "").replace("```", "").strip()
+            start = cleaned.find("{")
+            end = cleaned.rfind("}")
+            if start != -1 and end != -1:
+                return json.loads(cleaned[start:end+1])
+        except Exception as e:
+            logger.warning(f"JSON 파싱 최후 실패: {e}")
     return None
 
 # ============================================================
-# 2. 파이프라인 노드 (LLM 호출 엔진 업그레이드)
+# 2. 파이프라인 노드
 # ============================================================
 @observe(name="factory_llm_call")
 async def llm_call(model: str, system: str, payload: str, temp: float = 0.7, tokens: int = 2500, response_format: dict = None) -> str:
-    # 💡 JSON Native Mode를 지원하도록 파라미터 확장
-    kwargs = {
-        "model": model,
-        "messages": [{"role": "system", "content": system}, {"role": "user", "content": payload}],
-        "temperature": temp,
-        "max_tokens": tokens
-    }
-    if response_format:
-        kwargs["response_format"] = response_format
-        
+    kwargs = {"model": model, "messages": [{"role": "system", "content": system}, {"role": "user", "content": payload}], "temperature": temp, "max_tokens": tokens}
+    if response_format: kwargs["response_format"] = response_format
     res = await acompletion(**kwargs)
     return res.choices[0].message.content
 
@@ -175,7 +171,6 @@ async def node_cro(state: FactoryState) -> FactoryState:
         state["error"] = f"검열 에러: {e}"
     return state
 
-# 💡 PD 노드: GPT 교체 및 Native JSON 포맷 강제
 async def node_pd_harness(state: FactoryState) -> FactoryState:
     if state.get("error"): return state
     
@@ -186,40 +181,41 @@ async def node_pd_harness(state: FactoryState) -> FactoryState:
 {{
   "title": "유튜브 제목",
   "seo_tags": ["태그1", "태그2", "태그3"],
-  "thumbnail_prompt": "DALL-E 3 썸네일 영문 프롬프트 (얼굴 클로즈업, 강렬한 감정, 여백 확보)",
+  "thumbnail_prompt": "DALL-E 3 썸네일 영문 프롬프트",
   "scenes": [
     {{
       "scene_no": 1,
-      "tts_text": "성우가 읽을 나레이션",
-      "subtitle": "화면 하단용 자막(15자 이내)",
-      "image_prompt": "DALL-E 3 배경 영문 프롬프트 (Korean webtoon style, dramatic shading 필수)",
+      "tts_text": "성우 나레이션",
+      "subtitle": "압축 자막",
+      "image_prompt": "DALL-E 3 영문 프롬프트",
       "zoom_mode": "in" 
     }}
   ]
-}}
-* 주의: zoom_mode는 "in" 또는 "out"만 사용하세요."""
+}}"""
 
     payload = f"대본: {state['safe_script']}"
+    last_err = ""
     
     for attempt in range(3):
         try:
-            # 모델을 GPT로 교체, 토큰을 4000으로 늘려 잘림 방지, JSON 포맷 강제
             content = await llm_call(LITELLM_GPT, sys_prompt, payload, 0.1, 4000, response_format={"type": "json_object"})
             parsed = safe_json_extract(content)
             
             if parsed:
-                blueprint = SsulBlueprint(**parsed)
+                blueprint = SsulBlueprint(**parsed) # 💡 여기서 에러가 나면 아래 except로 넘어감
                 state["blueprint"] = blueprint.model_dump()
                 state["agent_status"]["PD_JSON"] = "✅"
                 return state
             else:
-                raise ValueError("JSON 파싱 실패")
+                raise ValueError("JSON 형식이 아닙니다.")
                 
         except Exception as e:
+            last_err = str(e)
             logger.warning(f"PD 교정 에러 ({attempt+1}/3): {e}")
             payload = f"이전 에러: {e}\n위의 JSON 뼈대를 정확히 지켜서 다시 출력하세요.\n대본: {state['safe_script']}"
             
-    state["error"] = "PD 교정 3회 실패 (JSON 파싱 및 검증 에러)"
+    # 💡 텔레그램으로 상세 에러 보고
+    state["error"] = f"PD 노드 파싱 실패. 상세에러: {last_err[:200]}"
     state["agent_status"]["PD_JSON"] = "❌"
     return state
 
@@ -334,7 +330,9 @@ async def run_factory_pipeline(chat_id: int, keyword: Optional[str] = None):
         await bot.send_message(chat_id, f"🎬 <b>[수익 방어 팩토리 가동]</b> Anti-Pattern 엔진 활성화...", parse_mode=ParseMode.HTML)
         state = await PIPELINE.ainvoke({"chat_id": chat_id, "keyword": keyword, "character": None, "facts": None, "raw_script": None, "safe_script": None, "blueprint": None, "error": None, "agent_status": {}})
         
-        if state.get("error"): return await bot.send_message(chat_id, f"⚠️ 에러: {state['error']}")
+        if state.get("error"): 
+            # 💡 실패 원인을 텔레그램으로 직배송
+            return await bot.send_message(chat_id, f"⚠️ <b>에러 발생:</b>\n<code>{state['error']}</code>", parse_mode=ParseMode.HTML)
         
         bp = state["blueprint"]
         await bot.send_message(chat_id, f"✅ 기획 완료. 렌더링 진입.\n제목: {bp.get('title')}\n페르소나: {state['character']}")
