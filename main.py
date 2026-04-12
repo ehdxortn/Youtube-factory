@@ -26,11 +26,16 @@ from googleapiclient.http import MediaFileUpload
 from google.oauth2.credentials import Credentials
 
 # ============================================================
-# 0. 고정 모델 ID 및 시스템 설정
+# 0. 고정 모델 ID 및 시스템 설정 (장프로 형님 확정안)
 # ============================================================
 GEMINI_MODEL_ID = "gemini-3.1-pro-preview"
 CLAUDE_MODEL_ID = "claude-sonnet-4-6"
 GPT_MODEL_ID    = "gpt-5.4"
+
+# LiteLLM provider/model 문자열
+LITELLM_GPT     = f"openai/{GPT_MODEL_ID}"
+LITELLM_CLAUDE  = "claude-sonnet-4-6"  
+LITELLM_GEMINI  = f"gemini/{GEMINI_MODEL_ID}"
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger("SSULTUBE-V48")
