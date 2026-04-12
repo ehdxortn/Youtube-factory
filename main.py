@@ -6,7 +6,7 @@ SOVEREIGN APEX — SSUL-TUBE FACTORY (ANTI-PATTERN & MONETIZATION EDITION)
   2. Character & Hook Engine: 페르소나 고정 및 첫 3초 훅 강제 설계
   3. Thumbnail Engine: DALL-E 3 CTR 최적화 썸네일 생성 및 API 자동 등록
   4. Anti-Pattern Randomizer: 줌 비율, 자막 크기, 위치 난수화로 대량생산 필터 회피
-  5. [FIX] PD Node: JSON 뼈대 하드코딩을 통한 구문 분석(Parsing) 에러 원천 차단
+  5. [HOTFIX] GPT-5.4 Native JSON Mode 강제 적용 및 토큰 해방 (파싱 에러 영구 차단)
 """
 
 import os, json, asyncio, logging, httpx, html, re, time, random
@@ -115,11 +115,21 @@ def safe_json_extract(text: str) -> Optional[dict]:
     return None
 
 # ============================================================
-# 2. 파이프라인 노드
+# 2. 파이프라인 노드 (LLM 호출 엔진 업그레이드)
 # ============================================================
 @observe(name="factory_llm_call")
-async def llm_call(model: str, system: str, payload: str, temp: float = 0.7, tokens: int = 2500) -> str:
-    res = await acompletion(model=model, messages=[{"role": "system", "content": system}, {"role": "user", "content": payload}], temperature=temp, max_tokens=tokens)
+async def llm_call(model: str, system: str, payload: str, temp: float = 0.7, tokens: int = 2500, response_format: dict = None) -> str:
+    # 💡 JSON Native Mode를 지원하도록 파라미터 확장
+    kwargs = {
+        "model": model,
+        "messages": [{"role": "system", "content": system}, {"role": "user", "content": payload}],
+        "temperature": temp,
+        "max_tokens": tokens
+    }
+    if response_format:
+        kwargs["response_format"] = response_format
+        
+    res = await acompletion(**kwargs)
     return res.choices[0].message.content
 
 async def node_sourcing(state: FactoryState) -> FactoryState:
@@ -150,7 +160,7 @@ async def node_writer(state: FactoryState) -> FactoryState:
     if state.get("error"): return state
     try:
         payload = f"주제: {state['keyword']}\n주인공: {state['character']}\n팩트: {state['facts']}\n첫 문장은 충격적인 3초 훅(Hook)으로 시작."
-        state["raw_script"] = await llm_call(LITELLM_GPT, HARNESS_CONTEXT, payload, 0.7, 2500)
+        state["raw_script"] = await llm_call(LITELLM_GPT, HARNESS_CONTEXT, payload, 0.7, 3000)
         state["agent_status"]["Writer"] = "✅"
     except Exception as e:
         state["error"] = f"대본 작성 에러: {e}"
@@ -159,19 +169,19 @@ async def node_writer(state: FactoryState) -> FactoryState:
 async def node_cro(state: FactoryState) -> FactoryState:
     if state.get("error"): return state
     try:
-        state["safe_script"] = await llm_call(LITELLM_CLAUDE, HARNESS_CONTEXT, f"유튜브 검열 위험 단어 우회.\n대본: {state['raw_script']}", 0.2, 2500)
+        state["safe_script"] = await llm_call(LITELLM_CLAUDE, HARNESS_CONTEXT, f"유튜브 검열 위험 단어 우회.\n대본: {state['raw_script']}", 0.2, 3000)
         state["agent_status"]["CRO"] = "✅"
     except Exception as e:
         state["error"] = f"검열 에러: {e}"
     return state
 
-# 💡 수정된 PD 하네스 노드 (JSON 뼈대 강제 주입 에디션)
+# 💡 PD 노드: GPT 교체 및 Native JSON 포맷 강제
 async def node_pd_harness(state: FactoryState) -> FactoryState:
     if state.get("error"): return state
     
     sys_prompt = f"""{HARNESS_CONTEXT}
 당신은 총괄 PD입니다. 제공된 대본을 분석하여 반드시 아래의 JSON 형식으로만 출력하세요. 
-마크다운 기호(```json)나 인사말, 부가 설명은 절대 넣지 마세요.
+마크다운 기호 없이 순수 JSON 객체만 반환해야 합니다.
 
 {{
   "title": "유튜브 제목",
@@ -180,20 +190,21 @@ async def node_pd_harness(state: FactoryState) -> FactoryState:
   "scenes": [
     {{
       "scene_no": 1,
-      "tts_text": "성우가 읽을 나레이션 전체 텍스트",
-      "subtitle": "화면 하단용 압축 자막 (15자 이내)",
+      "tts_text": "성우가 읽을 나레이션",
+      "subtitle": "화면 하단용 자막(15자 이내)",
       "image_prompt": "DALL-E 3 배경 영문 프롬프트 (Korean webtoon style, dramatic shading 필수)",
       "zoom_mode": "in" 
     }}
   ]
 }}
-* 주의: zoom_mode는 반드시 "in" 또는 "out" 중 하나만 소문자로 작성하세요."""
+* 주의: zoom_mode는 "in" 또는 "out"만 사용하세요."""
 
     payload = f"대본: {state['safe_script']}"
     
     for attempt in range(3):
         try:
-            content = await llm_call(LITELLM_GEMINI, sys_prompt, payload, 0.1, 2500)
+            # 모델을 GPT로 교체, 토큰을 4000으로 늘려 잘림 방지, JSON 포맷 강제
+            content = await llm_call(LITELLM_GPT, sys_prompt, payload, 0.1, 4000, response_format={"type": "json_object"})
             parsed = safe_json_extract(content)
             
             if parsed:
@@ -202,11 +213,11 @@ async def node_pd_harness(state: FactoryState) -> FactoryState:
                 state["agent_status"]["PD_JSON"] = "✅"
                 return state
             else:
-                raise ValueError("JSON 구조를 추출할 수 없습니다.")
+                raise ValueError("JSON 파싱 실패")
                 
         except Exception as e:
             logger.warning(f"PD 교정 에러 ({attempt+1}/3): {e}")
-            payload = f"이전 에러: {e}\n위의 JSON 뼈대를 정확히 지켜서 다시 출력하세요. 마크다운 빼고 순수 JSON만 출력하세요.\n대본: {state['safe_script']}"
+            payload = f"이전 에러: {e}\n위의 JSON 뼈대를 정확히 지켜서 다시 출력하세요.\n대본: {state['safe_script']}"
             
     state["error"] = "PD 교정 3회 실패 (JSON 파싱 및 검증 에러)"
     state["agent_status"]["PD_JSON"] = "❌"
@@ -300,7 +311,7 @@ def upload_to_youtube(video_path: str, thumb_path: str, title: str, tags: list) 
         from googleapiclient.discovery import build
         from googleapiclient.http import MediaFileUpload
         from google.oauth2.credentials import Credentials
-        creds = Credentials.from_authorized_user_file('token.json', ['[https://www.googleapis.com/auth/youtube.upload](https://www.googleapis.com/auth/youtube.upload)'])
+        creds = Credentials.from_authorized_user_file('token.json', ['https://www.googleapis.com/auth/youtube.upload'])
         youtube = build('youtube', 'v3', credentials=creds)
         body = {'snippet': {'title': title, 'description': "실화 바탕 썰다큐입니다.\n#사건사고 #썰튜브", 'tags': tags, 'categoryId': '24'}, 'status': {'privacyStatus': 'public'}}
         
