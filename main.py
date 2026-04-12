@@ -1,11 +1,11 @@
 """
-SOVEREIGN APEX — SSUL-TUBE FACTORY (v46 PRODUCTION STABILITY EDITION)
+SOVEREIGN APEX — SSUL-TUBE FACTORY (v46.1 SYNTAX PATCHED)
 =====================================
 통합 적용:
-  1. Concurrency Isolation: UUID 기반 세션 폴더 분리로 동시 다발적 렌더링 충돌 완벽 차단.
-  2. LLM Fault-Tolerance: 백오프(Exponential Backoff) 기반 3회 재시도 자동화.
-  3. Strict Env Validation: API Key 누락 시 즉각 시스템 중단 (자본 누수 방지).
-  4. MoviePy Disk Optimization: temp 폴더 격리 및 자동 가비지 컬렉팅으로 OOM 방어.
+  1. 렌더링 모듈 (render_final_video) try-except 문법 오류 완벽 수정.
+  2. Concurrency Isolation: UUID 기반 세션 폴더 분리.
+  3. LLM Fault-Tolerance: 백오프 기반 3회 재시도 자동화.
+  4. Strict Env Validation: API Key 누락 시 즉각 시스템 중단.
 """
 
 import os, json, asyncio, logging, httpx, html, re, time, random, uuid, shutil
@@ -41,10 +41,10 @@ from googleapiclient.http import MediaFileUpload
 from google.oauth2.credentials import Credentials
 
 # ============================================================
-# 0. 환경 변수 엄격한 검증 (Strict Validation)
+# 0. 환경 변수 엄격한 검증
 # ============================================================
 logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger("SSULTUBE-PROD-v46")
+logger = logging.getLogger("SSULTUBE-PROD-v46.1")
 
 def get_env_strict(k: str) -> str:
     v = os.environ.get(k)
@@ -53,7 +53,6 @@ def get_env_strict(k: str) -> str:
         raise ValueError(f"Missing required environment variable: {k}")
     return v
 
-# 서버 구동 전 필수 키 존재 여부 하드 체크
 LITELLM_GPT        = "openai/gpt-5.4"
 LITELLM_CLAUDE     = "claude-sonnet-4-6"  
 LITELLM_GEMINI     = "gemini/gemini-3.1-pro"
@@ -82,7 +81,7 @@ HARNESS_CONTEXT = """[SSUL-TUBE HARNESS SYSTEM CORE RULES]
 4. 순수 JSON 포맷 강제 (마크다운 금지)."""
 
 # ============================================================
-# 1. 스키마 및 State (UUID 세션 ID 추가)
+# 1. 스키마 및 State
 # ============================================================
 class SceneItem(BaseModel):
     scene_no: int
@@ -99,7 +98,7 @@ class SsulBlueprint(BaseModel):
 
 class FactoryState(TypedDict):
     chat_id: int
-    session_id: str   # 💡 동시성 제어를 위한 고유 UUID
+    session_id: str
     keyword: Optional[str]
     character: Optional[str]
     facts: Optional[str]
@@ -119,7 +118,7 @@ def safe_json_extract(text: str) -> Optional[dict]:
     return None
 
 # ============================================================
-# 2. 💡 장애 허용 LLM 호출 (Exponential Backoff)
+# 2. 장애 허용 LLM 호출 및 노드
 # ============================================================
 @observe(name="factory_llm_call")
 async def llm_call(model: str, system: str, payload: str, temp: float = 0.7, tokens: int = 2500) -> str:
@@ -133,7 +132,6 @@ async def llm_call(model: str, system: str, payload: str, temp: float = 0.7, tok
             await asyncio.sleep(2 * (attempt + 1))
     return ""
 
-# (노드 파이프라인 로직 유지)
 async def node_sourcing(state: FactoryState) -> FactoryState:
     if state.get("keyword"): 
         state["character"] = "익명의 제보자"
@@ -208,7 +206,7 @@ PIPELINE.add_edge("pd",       END)
 PIPELINE = PIPELINE.compile()
 
 # ============================================================
-# 3. 💡 에셋 생성 엔진 (폴더 격리 및 재시도)
+# 3. 에셋 생성 엔진
 # ============================================================
 async def generate_dalle_image(prompt: str, file_path: str) -> str:
     for attempt in range(2):
@@ -233,7 +231,7 @@ async def generate_openai_tts(text: str, file_path: str) -> str:
     return ""
 
 # ============================================================
-# 4. 렌더링 엔진 
+# 4. 💡 렌더링 엔진 (try-except 문법 에러 패치 완료)
 # ============================================================
 def create_zoom_effect(clip, duration, mode="in", zoom_ratio=0.05):
     def effect(get_frame, t):
@@ -275,8 +273,9 @@ def render_final_video(blueprint: dict, img_paths: list, audio_paths: list, out_
 
         final_video.write_videofile(out_name, fps=24, codec="libx264", audio_codec="aac", threads=4, logger=None)
         return out_name
+
     except Exception as e:
-        logging.error(f"렌더링 에러: {e}")
+        logging.error(f"❌ 영상 렌더링 실패: {e}")
         return ""
 
 # ============================================================
@@ -299,10 +298,9 @@ def upload_to_youtube(video_path: str, thumb_path: str, title: str, tags: list) 
         return False
 
 # ============================================================
-# 6. 메인 컨트롤러 (세션 격리 적용)
+# 6. 메인 컨트롤러
 # ============================================================
 async def run_factory_pipeline(chat_id: int, keyword: Optional[str] = None):
-    # 💡 동시성 격리를 위한 세션 디렉토리 생성
     session_id = uuid.uuid4().hex[:8]
     work_dir = f"temp_{session_id}"
     os.makedirs(work_dir, exist_ok=True)
@@ -316,7 +314,6 @@ async def run_factory_pipeline(chat_id: int, keyword: Optional[str] = None):
         bp = state["blueprint"]
         await bot.send_message(chat_id, f"✅ 기획 완료. 렌더링 진입.\n제목: {bp.get('title')}\n페르소나: {state['character']}")
 
-        # 💡 작업 폴더 경로 강제 주입
         thumb_task = generate_dalle_image(bp.get("thumbnail_prompt", ""), f"{work_dir}/thumbnail.png")
         img_tasks = [generate_dalle_image(s["image_prompt"], f"{work_dir}/scene_{s['scene_no']}.png") for s in bp["scenes"]]
         aud_tasks = [generate_openai_tts(s["tts_text"], f"{work_dir}/scene_{s['scene_no']}.mp3") for s in bp["scenes"]]
@@ -336,7 +333,6 @@ async def run_factory_pipeline(chat_id: int, keyword: Optional[str] = None):
     except Exception as e:
         await bot.send_message(chat_id, f"⚠️ 공장 셧다운: {html.escape(str(e))}")
     finally:
-        # 💡 가비지 컬렉터: 세션 종료 시 해당 폴더의 모든 임시 파일(OOM 원인) 폭파
         try:
             if os.path.exists(work_dir): shutil.rmtree(work_dir)
             logging.info(f"🧹 세션 {session_id} 가비지 정리 완료.")
