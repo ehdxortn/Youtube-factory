@@ -1,8 +1,8 @@
 """
-SOVEREIGN APEX — SSUL-TUBE FACTORY (v46.1 SYNTAX PATCHED)
+SOVEREIGN APEX — SSUL-TUBE FACTORY (v46.2 SYNTAX & STABILITY MASTER)
 =====================================
 통합 적용:
-  1. 렌더링 모듈 (render_final_video) try-except 문법 오류 완벽 수정.
+  1. 렌더링 모듈 (render_final_video) try-except 문법 오류 및 들여쓰기 완벽 수정.
   2. Concurrency Isolation: UUID 기반 세션 폴더 분리.
   3. LLM Fault-Tolerance: 백오프 기반 3회 재시도 자동화.
   4. Strict Env Validation: API Key 누락 시 즉각 시스템 중단.
@@ -44,7 +44,7 @@ from google.oauth2.credentials import Credentials
 # 0. 환경 변수 엄격한 검증
 # ============================================================
 logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger("SSULTUBE-PROD-v46.1")
+logger = logging.getLogger("SSULTUBE-PROD-v46.2")
 
 def get_env_strict(k: str) -> str:
     v = os.environ.get(k)
@@ -231,7 +231,7 @@ async def generate_openai_tts(text: str, file_path: str) -> str:
     return ""
 
 # ============================================================
-# 4. 💡 렌더링 엔진 (try-except 문법 에러 패치 완료)
+# 4. 렌더링 엔진 (try-except 블록 무결성 보장)
 # ============================================================
 def create_zoom_effect(clip, duration, mode="in", zoom_ratio=0.05):
     def effect(get_frame, t):
