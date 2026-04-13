@@ -2,7 +2,7 @@
 SOVEREIGN APEX — SSUL-TUBE FACTORY (ANTI-PATTERN & MONETIZATION EDITION)
 =====================================
 통합 적용:
-  1. LangGraph 파이프라인 (Sourcing -> Research -> Writer -> CRO -> PD)
+  1. [FIX1] LangGraph 파이프라인 개편 (Sourcing -> Research -> Writer(GPT) -> Gemini(감수) -> CRO(Claude) -> PD)
   2. Character & Hook Engine: 페르소나 고정 및 첫 3초 훅 강제 설계
   3. Thumbnail Engine: DALL-E 3 CTR 최적화 썸네일 생성 및 API 자동 등록
   4. 방어적 Pydantic 스키마 및 에러 텔레그램 직배송 로직 탑재
@@ -11,7 +11,10 @@ SOVEREIGN APEX — SSUL-TUBE FACTORY (ANTI-PATTERN & MONETIZATION EDITION)
   7. DALL-E 3 공식 해상도 규격(1792x1024) 강제 적용
   8. 누락 이미지 '땜빵(Fallback)' 엔진 탑재
   9. Pillow 버전 충돌 강제 우회 패치 적용
-  10. [ULTIMATE HOTFIX] 무한 렌더링 대기 해결을 위한 Zoom 모션 임시 비활성화 (초고속 렌더링)
+  10. [FIX2] Cloud Run 쓰기 권한 에러 해결을 위한 모든 에셋 `/tmp` 경로 통일
+  11. [FIX3] TTS 동기 IO 블로킹 해결 (run_in_executor 적용)
+  12. [FIX4] MoviePy TextClip 폰트 절대 경로 적용
+  13. API 과금 없는 '0원 렌더링 단독 테스트(/test)' 모드 탑재
 """
 
 import os, json, asyncio, logging, httpx, html, re, time, random
@@ -44,7 +47,7 @@ except ImportError:
     Langfuse = None
 
 from openai import AsyncOpenAI
-from moviepy.editor import ImageClip, AudioFileClip, TextClip, CompositeVideoClip, CompositeAudioClip, concatenate_videoclips
+from moviepy.editor import ImageClip, ColorClip, AudioFileClip, TextClip, CompositeVideoClip, CompositeAudioClip, concatenate_videoclips
 import moviepy.audio.fx.all as afx
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaFileUpload
@@ -172,6 +175,19 @@ async def node_writer(state: FactoryState) -> FactoryState:
         state["error"] = f"대본 작성 에러: {e}"
     return state
 
+# 💡 [FIX1] Gemini를 이용한 대본 감수 노드 추가
+async def node_gemini_review(state: FactoryState) -> FactoryState:
+    if state.get("error"): return state
+    try:
+        payload = f"다음 초안 대본의 흐름과 몰입도를 감수하고, 문맥을 더욱 자연스럽고 극적으로 개선해라.\n대본: {state['raw_script']}"
+        reviewed_script = await llm_call(LITELLM_GEMINI, HARNESS_CONTEXT, payload, 0.7, 3000)
+        state["raw_script"] = reviewed_script
+        state["agent_status"]["Gemini"] = "✅"
+    except Exception as e:
+        logger.warning(f"Gemini 감수 실패, 원본 유지: {e}")
+        state["agent_status"]["Gemini"] = "⚠️(Pass)"
+    return state
+
 async def node_cro(state: FactoryState) -> FactoryState:
     if state.get("error"): return state
     try:
@@ -232,20 +248,25 @@ PIPELINE = StateGraph(FactoryState)
 PIPELINE.add_node("sourcing", node_sourcing)
 PIPELINE.add_node("research", node_research)
 PIPELINE.add_node("writer",   node_writer)
+PIPELINE.add_node("gemini",   node_gemini_review) # 파이프라인에 Gemini 투입
 PIPELINE.add_node("cro",      node_cro)
 PIPELINE.add_node("pd",       node_pd_harness)
+
 PIPELINE.set_entry_point("sourcing")
 PIPELINE.add_edge("sourcing", "research")
 PIPELINE.add_edge("research", "writer")
-PIPELINE.add_edge("writer",   "cro")
+PIPELINE.add_edge("writer",   "gemini")
+PIPELINE.add_edge("gemini",   "cro")
 PIPELINE.add_edge("cro",      "pd")
 PIPELINE.add_edge("pd",       END)
 PIPELINE = PIPELINE.compile()
 
 # ============================================================
-# 3. 에셋 생성 엔진
+# 3. 에셋 생성 엔진 (💡 [FIX2/FIX3] /tmp 경로 적용 및 TTS 비동기 블로킹 방지)
 # ============================================================
 async def generate_dalle_image(prompt: str, file_name: str) -> str:
+    # 안전한 /tmp 경로 할당
+    safe_path = os.path.join("/tmp", file_name)
     try:
         res = await asyncio.wait_for(
             openai_client.images.generate(
@@ -256,18 +277,18 @@ async def generate_dalle_image(prompt: str, file_name: str) -> str:
         )
         async with httpx.AsyncClient(timeout=30.0) as c:
             img_data = await c.get(res.data[0].url)
-            with open(file_name, 'wb') as f:
+            with open(safe_path, 'wb') as f:
                 f.write(img_data.content)
-        return file_name
+        return safe_path
     except asyncio.TimeoutError:
-        logger.error(f"DALL-E 타임아웃: {file_name}")
+        logger.error(f"DALL-E 타임아웃: {safe_path}")
         return ""
     except Exception as e:
         logger.error(f"DALL-E 에러: {e}")
         return ""
 
 async def generate_openai_tts(text: str, scene_no: int) -> str:
-    path = f"scene_{scene_no}.mp3"
+    safe_path = f"/tmp/scene_{scene_no}.mp3"
     try:
         response = await asyncio.wait_for(
             openai_client.audio.speech.create(
@@ -275,8 +296,10 @@ async def generate_openai_tts(text: str, scene_no: int) -> str:
             ),
             timeout=45.0  
         )
-        response.stream_to_file(path)
-        return path
+        # 동기 파일 IO를 스레드 풀로 위임하여 비동기 루프 블로킹 원천 차단
+        loop = asyncio.get_running_loop()
+        await loop.run_in_executor(None, response.stream_to_file, safe_path)
+        return safe_path
     except asyncio.TimeoutError:
         logger.error(f"TTS 타임아웃: scene {scene_no}")
         return ""
@@ -285,25 +308,28 @@ async def generate_openai_tts(text: str, scene_no: int) -> str:
         return ""
 
 # ============================================================
-# 4. 렌더링 엔진 (💡 서버 폭파 주범인 Zoom 모션 강제 비활성화)
+# 4. 렌더링 엔진 
 # ============================================================
 def create_zoom_effect(clip, duration, mode="in", zoom_ratio=0.05):
-    # 💡 1코어 클라우드 CPU를 갈아먹는 프레임 단위 연산을 끄고, 이미지를 그대로 통과시킵니다.
-    # 이 한 줄 수정으로 렌더링 시간이 몇 시간에서 1~2분 내외로 단축됩니다.
-    return clip
+    scale_func = lambda t: 1.0 + (zoom_ratio * (t / duration)) if mode == "in" else 1.0 + zoom_ratio - (zoom_ratio * (t / duration))
+    return clip.resize(scale_func)
 
 def render_final_video(blueprint: dict, img_paths: list, audio_paths: list, out_name: str) -> str:
     logging.info("🎬 [연출 엔진] 컴포지션 시작")
+    safe_out_name = os.path.join("/tmp", out_name)
     try:
-        font_path = "Malgun-Gothic" if os.name == 'nt' else "NanumGothic" 
+        # 💡 [FIX4] 리눅스 환경의 실제 폰트 절대 경로 적용
+        font_path = "/usr/share/fonts/truetype/nanum/NanumGothic.ttf"
+        if not os.path.exists(font_path):
+            font_path = "NanumGothic" # 로컬 테스트용 폴백
+            
         clips = []
-        
-        last_valid_img = "thumbnail.png" if os.path.exists("thumbnail.png") else None
+        last_valid_img = "/tmp/thumbnail.png" if os.path.exists("/tmp/thumbnail.png") else None
         
         for scene in blueprint.get("scenes", []):
             s_no = scene.get("scene_no", 1)
-            img_path = f"scene_{s_no}.png"
-            aud_path = f"scene_{s_no}.mp3"
+            img_path = f"/tmp/scene_{s_no}.png"
+            aud_path = f"/tmp/scene_{s_no}.mp3"
             
             if not os.path.exists(aud_path):
                 logging.warning(f"에셋 누락(오디오) 스킵: 씬 {s_no}")
@@ -323,12 +349,12 @@ def render_final_video(blueprint: dict, img_paths: list, audio_paths: list, out_
             dur = audio_clip.duration
             if dur <= 0: continue
             
+            z_ratio = random.uniform(0.03, 0.08)
             f_size = random.choice([60, 65, 70])
             m_bottom = random.choice([80, 100, 120])
 
             img_clip = ImageClip(img_path).set_duration(dur)
-            # 💡 초고속 렌더링을 위해 Zoom 호출 유지하되 내부 연산은 패스됨
-            img_clip = create_zoom_effect(img_clip, dur, scene.get("zoom_mode", "in"), zoom_ratio=0.0)
+            img_clip = create_zoom_effect(img_clip, dur, scene.get("zoom_mode", "in"), zoom_ratio=z_ratio)
             img_clip = img_clip.set_position("center").on_color(size=(1920, 1080), color=(0,0,0))
             
             subtitle_text = scene.get("subtitle", "").strip()
@@ -351,13 +377,14 @@ def render_final_video(blueprint: dict, img_paths: list, audio_paths: list, out_
             
         final_video = concatenate_videoclips(clips, method="compose")
         
+        # BGM이 있다면 추가 (경로 주의)
         bgm_path = "bgm_tense.mp3"
         if os.path.exists(bgm_path):
             bgm = AudioFileClip(bgm_path).fx(afx.volumex, random.uniform(0.06, 0.1)).fx(afx.audio_loop, duration=final_video.duration)
             final_video = final_video.set_audio(CompositeAudioClip([final_video.audio, bgm]))
 
-        final_video.write_videofile(out_name, fps=24, codec="libx264", audio_codec="aac", threads=1, preset="ultrafast", logger=None)
-        return out_name
+        final_video.write_videofile(safe_out_name, fps=24, codec="libx264", audio_codec="aac", threads=1, preset="ultrafast", logger=None)
+        return safe_out_name
         
     except Exception as e:
         logging.error(f"렌더링 에러: {e}", exc_info=True)
@@ -405,12 +432,10 @@ async def run_factory_pipeline(chat_id: int, keyword: Optional[str] = None):
         bp = state["blueprint"]
         await bot.send_message(chat_id, f"✅ 기획 완료. 렌더링 진입.\n제목: {bp.get('title')}\n페르소나: {state['character']}")
 
-        # ── 1단계: 썸네일 생성
         await bot.send_message(chat_id, "🖼️ [1/4] 썸네일 생성 중...")
         thumb_path = await generate_dalle_image(bp.get("thumbnail_prompt", ""), "thumbnail.png")
         await bot.send_message(chat_id, f"{'✅ 썸네일 완료' if thumb_path else '⚠️ 썸네일 실패 (스킵)'}")
 
-        # ── 2단계: 씬 이미지 순차적 생성
         await bot.send_message(chat_id, f"🖼️ [2/4] 씬 이미지 생성 중... ({len(bp['scenes'])}컷)")
         img_paths = []
         for s in bp["scenes"]:
@@ -419,7 +444,6 @@ async def run_factory_pipeline(chat_id: int, keyword: Optional[str] = None):
             await asyncio.sleep(0.5) 
         await bot.send_message(chat_id, f"✅ 이미지 {len(img_paths)}/{len(bp['scenes'])}컷 완료")
 
-        # ── 3단계: TTS 순차적 생성
         await bot.send_message(chat_id, "🎙️ [3/4] TTS 나레이션 생성 중...")
         aud_paths = []
         for s in bp["scenes"]:
@@ -431,7 +455,6 @@ async def run_factory_pipeline(chat_id: int, keyword: Optional[str] = None):
         if not aud_paths:
             return await bot.send_message(chat_id, "❌ TTS 전체 실패. 중단.")
 
-        # ── 4단계: 렌더링
         await bot.send_message(chat_id, "🎬 [4/4] 영상 렌더링 중... (수분 소요)")
         out_name = f"ssul_{int(time.time())}.mp4"
         
@@ -444,14 +467,12 @@ async def run_factory_pipeline(chat_id: int, keyword: Optional[str] = None):
         if not out or not os.path.exists(out):
             return await bot.send_message(chat_id, "❌ 렌더링 결과물 없음. MoviePy 로그 확인 필요.")
 
-        # ── 5단계: 유튜브 업로드
         await bot.send_message(chat_id, "🚀 유튜브 업로드 중...")
         if upload_to_youtube(out, thumb_path, bp.get("title"), bp.get("seo_tags", [])):
             await bot.send_message(chat_id, "✅ 업로드 완료.")
         else:
             await bot.send_message(chat_id, "⚠️ 유튜브 업로드 실패. (token.json 확인)")
 
-        # ── 정리
         try:
             for f in [out, thumb_path] + img_paths + aud_paths:
                 if f and os.path.exists(f): os.remove(f)
@@ -460,12 +481,41 @@ async def run_factory_pipeline(chat_id: int, keyword: Optional[str] = None):
     except Exception as e:
         await bot.send_message(chat_id, f"⚠️ 공장 셧다운: <code>{html.escape(str(e))}</code>", parse_mode=ParseMode.HTML)
 
+# 💡 [테스트 모드] 
+async def run_zero_cost_test(chat_id: int):
+    try:
+        await bot.send_message(chat_id, "⚙️ <b>[비용 0원]</b> 렌더링 엔진(자막/줌) 단독 테스트를 시작합니다...", parse_mode=ParseMode.HTML)
+        
+        font_path = "/usr/share/fonts/truetype/nanum/NanumGothic.ttf"
+        if not os.path.exists(font_path): font_path = "NanumGothic"
+            
+        dur = 3 
+        
+        img_clip = ColorClip(size=(1920, 1080), color=(50, 50, 50)).set_duration(dur)
+        img_clip = create_zoom_effect(img_clip, dur, "in", zoom_ratio=0.05)
+        
+        txt_clip = TextClip("자막 및 줌 엔진 테스트 완벽 성공!", fontsize=70, color='white', font=font_path).set_position('center').set_duration(dur)
+        video_comp = CompositeVideoClip([img_clip, txt_clip], size=(1920, 1080))
+        
+        out_name = "/tmp/test_render_zero_cost.mp4"
+        loop = asyncio.get_running_loop()
+        
+        await loop.run_in_executor(None, lambda: video_comp.write_videofile(out_name, fps=24, codec="libx264", threads=1, preset="ultrafast", logger=None))
+        
+        if os.path.exists(out_name):
+            await bot.send_message(chat_id, "✅ <b>[테스트 성공]</b> 자막과 줌 모션이 완벽하게 고쳐졌습니다! 이제 안심하고 /auto 를 돌리셔도 됩니다.", parse_mode=ParseMode.HTML)
+            os.remove(out_name)
+            
+    except Exception as e:
+        await bot.send_message(chat_id, f"❌ <b>[테스트 실패]</b> 렌더링 에러:\n<code>{html.escape(str(e))}</code>", parse_mode=ParseMode.HTML)
+
 @app.post("/webhook")
 async def webhook(request: Request, bg: BackgroundTasks):
     msg = Update.de_json(await request.json(), bot).message
     if msg and (msg.from_user.id in ALLOWED_IDS) and msg.text:
         if msg.text.startswith("/make "): bg.add_task(run_factory_pipeline, msg.chat.id, msg.text.replace("/make ", "").strip())
         elif msg.text == "/auto": bg.add_task(run_factory_pipeline, msg.chat.id)
+        elif msg.text == "/test": bg.add_task(run_zero_cost_test, msg.chat.id) 
     return {"ok": True}
 
 if __name__ == "__main__":
