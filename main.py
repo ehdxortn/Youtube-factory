@@ -8,9 +8,9 @@ SOVEREIGN APEX — SSUL-TUBE FACTORY (ANTI-PATTERN & MONETIZATION EDITION)
   4. Anti-Pattern Randomizer: 줌 비율, 자막 크기, 위치 난수화로 대량생산 필터 회피
   5. 방어적 Pydantic 스키마 및 에러 텔레그램 직배송 로직 탑재
   6. 구간별 상태 보고 및 MoviePy 별도 스레드(Executor) 격리
-  7. API 네트워크 무한 대기(Hang) 방지를 위한 Async Timeout 강제 적용
-  8. MoviePy 빈 자막 크래시 방어 및 Zoom 모션 메모리 누수 최적화
-  9. [FINAL FIX] OpenAI API Rate Limit 방어용 순차 생성(Sequential) 공정 도입
+  7. API 네트워크 무한 대기(Hang) 방지 Async Timeout 강제 적용
+  8. DALL-E 3 공식 해상도 규격(1792x1024) 강제 적용
+  9. [ULTIMATE FIX] DALL-E 안전 정책 우회 프롬프트 및 누락 이미지 '땜빵(Fallback)' 엔진 탑재
 """
 
 import os, json, asyncio, logging, httpx, html, re, time, random
@@ -75,11 +75,13 @@ app = FastAPI()
 ALLOWED_IDS = [int(x) for x in get_env("ALLOWED_USER_ID", "0").split(",")]
 openai_client = AsyncOpenAI(api_key=get_env("OPENAI_API_KEY"))
 
+# 💡 DALL-E 안전 정책 우회를 위한 강력한 프롬프트 지침 추가
 HARNESS_CONTEXT = """[SSUL-TUBE HARNESS SYSTEM CORE RULES]
 1. 비식별화 및 검열 우회 100% 적용.
 2. 시각적 일관성: image_prompt에 "Korean webtoon style, dramatic shading" 유지.
 3. 훅(Hook) 강제: 1번 씬은 무조건 가장 자극적인 3초 이내의 결론/반전 스포일러로 배치한다.
-4. 순수 JSON 포맷 강제 (마크다운 금지)."""
+4. 순수 JSON 포맷 강제 (마크다운 금지).
+5. [중요] DALL-E 안전 정책 우회: image_prompt에는 절대 폭력, 피, 흉기, 범죄, 자해, 극단적 혐오 표현을 넣지 마세요. 갈등과 분노는 '어두운 그림자', '깨진 거울', '비 내리는 창문' 등 은유적이고 추상적으로 묘사하세요."""
 
 # ============================================================
 # 1. 스키마 및 State
@@ -185,13 +187,13 @@ async def node_pd_harness(state: FactoryState) -> FactoryState:
 {{
   "title": "유튜브 제목",
   "seo_tags": ["태그1", "태그2", "태그3"],
-  "thumbnail_prompt": "DALL-E 3 썸네일 영문 프롬프트",
+  "thumbnail_prompt": "DALL-E 3 썸네일 영문 프롬프트 (안전 규정 준수)",
   "scenes": [
     {{
       "scene_no": 1,
       "tts_text": "성우 나레이션",
       "subtitle": "압축 자막",
-      "image_prompt": "DALL-E 3 영문 프롬프트",
+      "image_prompt": "DALL-E 3 영문 프롬프트 (안전 규정 준수, 은유적 표현)",
       "zoom_mode": "in" 
     }}
   ]
@@ -279,7 +281,7 @@ async def generate_openai_tts(text: str, scene_no: int) -> str:
         return ""
 
 # ============================================================
-# 4. 렌더링 엔진 
+# 4. 렌더링 엔진 (💡 누락 이미지 땜빵(Fallback) 로직 추가)
 # ============================================================
 def create_zoom_effect(clip, duration, mode="in", zoom_ratio=0.05):
     scale_func = lambda t: 1.0 + (zoom_ratio * (t / duration)) if mode == "in" else 1.0 + zoom_ratio - (zoom_ratio * (t / duration))
@@ -291,14 +293,29 @@ def render_final_video(blueprint: dict, img_paths: list, audio_paths: list, out_
         font_path = "Malgun-Gothic" if os.name == 'nt' else "NanumGothic" 
         clips = []
         
+        # 💡 땜빵용 예비 이미지 등록 (썸네일이 있으면 최우선, 없으면 None)
+        last_valid_img = "thumbnail.png" if os.path.exists("thumbnail.png") else None
+        
         for scene in blueprint.get("scenes", []):
             s_no = scene.get("scene_no", 1)
             img_path = f"scene_{s_no}.png"
             aud_path = f"scene_{s_no}.mp3"
             
-            if not os.path.exists(img_path) or not os.path.exists(aud_path):
-                logging.warning(f"에셋 누락 스킵: 씬 {s_no}")
+            # 오디오가 없으면 씬 진행 불가 (이건 스킵해야 함)
+            if not os.path.exists(aud_path):
+                logging.warning(f"에셋 누락(오디오) 스킵: 씬 {s_no}")
                 continue
+                
+            # 💡 이미지가 DALL-E 검열 등으로 누락되었을 경우 땜빵 처리
+            if not os.path.exists(img_path):
+                if last_valid_img and os.path.exists(last_valid_img):
+                    logging.warning(f"이미지 검열 누락. 땜빵 이미지 사용: 씬 {s_no}")
+                    img_path = last_valid_img
+                else:
+                    logging.warning(f"땜빵용 이미지도 없음. 씬 전체 스킵: 씬 {s_no}")
+                    continue
+            else:
+                last_valid_img = img_path # 정상 생성되었으면 다음 땜빵용으로 업데이트
                 
             audio_clip = AudioFileClip(aud_path)
             dur = audio_clip.duration
@@ -328,7 +345,7 @@ def render_final_video(blueprint: dict, img_paths: list, audio_paths: list, out_
             clips.append(video_comp)
             
         if not clips:
-            raise ValueError("합성할 유효한 씬이 없습니다. (에셋 생성 모두 실패)")
+            raise ValueError("합성할 유효한 씬이 없습니다. (오디오 생성 모두 실패)")
             
         final_video = concatenate_videoclips(clips, method="compose")
         
@@ -369,7 +386,7 @@ def upload_to_youtube(video_path: str, thumb_path: str, title: str, tags: list) 
         return False
 
 # ============================================================
-# 6. 메인 컨트롤러 (💡 순차적 에셋 생성으로 Rate Limit 완벽 방어)
+# 6. 메인 컨트롤러 
 # ============================================================
 async def run_factory_pipeline(chat_id: int, keyword: Optional[str] = None):
     try:
@@ -391,25 +408,22 @@ async def run_factory_pipeline(chat_id: int, keyword: Optional[str] = None):
         thumb_path = await generate_dalle_image(bp.get("thumbnail_prompt", ""), "thumbnail.png")
         await bot.send_message(chat_id, f"{'✅ 썸네일 완료' if thumb_path else '⚠️ 썸네일 실패 (스킵)'}")
 
-        # ── 2단계: 씬 이미지 순차적 생성 (Rate Limit 방어)
+        # ── 2단계: 씬 이미지 순차적 생성
         await bot.send_message(chat_id, f"🖼️ [2/4] 씬 이미지 생성 중... ({len(bp['scenes'])}컷)")
         img_paths = []
         for s in bp["scenes"]:
             p = await generate_dalle_image(s["image_prompt"], f"scene_{s['scene_no']}.png")
             if p: img_paths.append(p)
-            await asyncio.sleep(0.5) # 0.5초 대기
+            await asyncio.sleep(0.5) 
         await bot.send_message(chat_id, f"✅ 이미지 {len(img_paths)}/{len(bp['scenes'])}컷 완료")
 
-        if not img_paths:
-            return await bot.send_message(chat_id, "❌ 이미지 전체 실패. 중단.")
-
-        # ── 3단계: TTS 순차적 생성 (Rate Limit 방어)
+        # ── 3단계: TTS 순차적 생성
         await bot.send_message(chat_id, "🎙️ [3/4] TTS 나레이션 생성 중...")
         aud_paths = []
         for s in bp["scenes"]:
             p = await generate_openai_tts(s["tts_text"], s["scene_no"])
             if p: aud_paths.append(p)
-            await asyncio.sleep(0.5) # 0.5초 대기
+            await asyncio.sleep(0.5) 
         await bot.send_message(chat_id, f"✅ TTS {len(aud_paths)}/{len(bp['scenes'])}개 완료")
 
         if not aud_paths:
