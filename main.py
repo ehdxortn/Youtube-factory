@@ -10,7 +10,7 @@ SOVEREIGN APEX — SSUL-TUBE FACTORY (ANTI-PATTERN & MONETIZATION EDITION)
   6. 구간별 상태 보고 및 MoviePy 별도 스레드(Executor) 격리
   7. API 네트워크 무한 대기(Hang) 방지를 위한 Async Timeout 강제 적용
   8. MoviePy 빈 자막 크래시 방어 및 Zoom 모션 메모리 누수 최적화
-  9. [HOTFIX] DALL-E 3 공식 해상도 규격(1792x1024) 강제 적용 (입구컷 에러 해결)
+  9. [FINAL FIX] OpenAI API Rate Limit 방어용 순차 생성(Sequential) 공정 도입
 """
 
 import os, json, asyncio, logging, httpx, html, re, time, random
@@ -237,14 +237,14 @@ PIPELINE.add_edge("pd",       END)
 PIPELINE = PIPELINE.compile()
 
 # ============================================================
-# 3. 에셋 생성 엔진 (💡 DALL-E 3 사이즈 오류 수정)
+# 3. 에셋 생성 엔진
 # ============================================================
 async def generate_dalle_image(prompt: str, file_name: str) -> str:
     try:
         res = await asyncio.wait_for(
             openai_client.images.generate(
                 model="dall-e-3", prompt=prompt,
-                size="1792x1024", quality="hd", n=1  # 💡 규격에 맞는 공식 16:9 해상도로 변경
+                size="1792x1024", quality="hd", n=1 
             ),
             timeout=60.0  
         )
@@ -369,7 +369,7 @@ def upload_to_youtube(video_path: str, thumb_path: str, title: str, tags: list) 
         return False
 
 # ============================================================
-# 6. 메인 컨트롤러
+# 6. 메인 컨트롤러 (💡 순차적 에셋 생성으로 Rate Limit 완벽 방어)
 # ============================================================
 async def run_factory_pipeline(chat_id: int, keyword: Optional[str] = None):
     try:
@@ -391,21 +391,25 @@ async def run_factory_pipeline(chat_id: int, keyword: Optional[str] = None):
         thumb_path = await generate_dalle_image(bp.get("thumbnail_prompt", ""), "thumbnail.png")
         await bot.send_message(chat_id, f"{'✅ 썸네일 완료' if thumb_path else '⚠️ 썸네일 실패 (스킵)'}")
 
-        # ── 2단계: 씬 이미지 생성
+        # ── 2단계: 씬 이미지 순차적 생성 (Rate Limit 방어)
         await bot.send_message(chat_id, f"🖼️ [2/4] 씬 이미지 생성 중... ({len(bp['scenes'])}컷)")
-        img_tasks = [generate_dalle_image(s["image_prompt"], f"scene_{s['scene_no']}.png") for s in bp["scenes"]]
-        img_paths = await asyncio.gather(*img_tasks)
-        img_paths = [p for p in img_paths if p]
+        img_paths = []
+        for s in bp["scenes"]:
+            p = await generate_dalle_image(s["image_prompt"], f"scene_{s['scene_no']}.png")
+            if p: img_paths.append(p)
+            await asyncio.sleep(0.5) # 0.5초 대기
         await bot.send_message(chat_id, f"✅ 이미지 {len(img_paths)}/{len(bp['scenes'])}컷 완료")
 
         if not img_paths:
             return await bot.send_message(chat_id, "❌ 이미지 전체 실패. 중단.")
 
-        # ── 3단계: TTS 생성
+        # ── 3단계: TTS 순차적 생성 (Rate Limit 방어)
         await bot.send_message(chat_id, "🎙️ [3/4] TTS 나레이션 생성 중...")
-        aud_tasks = [generate_openai_tts(s["tts_text"], s["scene_no"]) for s in bp["scenes"]]
-        aud_paths = await asyncio.gather(*aud_tasks)
-        aud_paths = [p for p in aud_paths if p]
+        aud_paths = []
+        for s in bp["scenes"]:
+            p = await generate_openai_tts(s["tts_text"], s["scene_no"])
+            if p: aud_paths.append(p)
+            await asyncio.sleep(0.5) # 0.5초 대기
         await bot.send_message(chat_id, f"✅ TTS {len(aud_paths)}/{len(bp['scenes'])}개 완료")
 
         if not aud_paths:
