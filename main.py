@@ -1,18 +1,18 @@
 """
-SOVEREIGN APEX — SSUL-TUBE FACTORY (ANTI-PATTERN & MONETIZATION EDITION)
+SOVEREIGN APEX — SSUL-TUBE FACTORY (DEBUGGING & MONETIZATION EDITION)
 =====================================
 통합 적용:
   1. LangGraph 파이프라인 (Sourcing -> Research -> Writer -> CRO -> PD)
   2. Character & Hook Engine: 페르소나 고정 및 첫 3초 훅 강제 설계
   3. Thumbnail Engine: DALL-E 3 CTR 최적화 썸네일 생성 및 API 자동 등록
-  4. Anti-Pattern Randomizer: 줌 비율, 자막 크기, 위치 난수화로 대량생산 필터 회피
-  5. [ULTIMATE FIX] 방어적 Pydantic 스키마 및 에러 텔레그램 직배송 로직 탑재
+  4. Anti-Pattern Randomizer: 대량생산 필터 회피
+  5. [DEBUG FIX] PD 노드 GPT 원본 응답 추출 및 Pydantic 유연성 극대화 (extra='ignore')
 """
 
 import os, json, asyncio, logging, httpx, html, re, time, random
 from datetime import datetime, timezone
 from typing import Optional, List, Literal, TypedDict
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ConfigDict
 
 from fastapi import FastAPI, Request, BackgroundTasks
 from telegram import Update, Bot
@@ -50,7 +50,7 @@ LITELLM_GEMINI     = "gemini/gemini-3.1-pro"
 LITELLM_PERPLEXITY = "perplexity/sonar-pro"
 
 logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger("SSULTUBE-FACTORY-MONEY")
+logger = logging.getLogger("SSULTUBE-FACTORY-DEBUG")
 
 def get_env(k, default=""):
     v = os.environ.get(k, default)
@@ -78,14 +78,14 @@ HARNESS_CONTEXT = """[SSUL-TUBE HARNESS SYSTEM CORE RULES]
 4. 순수 JSON 포맷 강제 (마크다운 금지)."""
 
 # ============================================================
-# 1. 스키마 및 State (💡 방어적 코딩: 기본값 설정으로 에러 원천 차단)
+# 1. 스키마 및 State
 # ============================================================
 class SceneItem(BaseModel):
     scene_no: int = 1
     tts_text: str = "대본 생성 오류"
     subtitle: str = "자막 누락"
     image_prompt: str = "Korean webtoon style, dramatic shading, intense scene"
-    zoom_mode: str = "in" # Literal 대신 str로 완화
+    zoom_mode: str = "in"
 
 class SsulBlueprint(BaseModel):
     title: str = "기막힌 인생실화"
@@ -106,7 +106,7 @@ class FactoryState(TypedDict):
 
 def safe_json_extract(text: str) -> Optional[dict]:
     try:
-        return json.loads(text) # Native JSON 우선 시도
+        return json.loads(text)
     except:
         try:
             cleaned = text.replace("```json", "").replace("```", "").strip()
@@ -171,12 +171,12 @@ async def node_cro(state: FactoryState) -> FactoryState:
         state["error"] = f"검열 에러: {e}"
     return state
 
+# 💡 [핵심] 형님의 진단용 PD 하네스 노드 결합
 async def node_pd_harness(state: FactoryState) -> FactoryState:
     if state.get("error"): return state
     
     sys_prompt = f"""{HARNESS_CONTEXT}
-당신은 총괄 PD입니다. 제공된 대본을 분석하여 반드시 아래의 JSON 형식으로만 출력하세요. 
-마크다운 기호 없이 순수 JSON 객체만 반환해야 합니다.
+당신은 총괄 PD입니다. 반드시 아래 JSON 형식으로만 출력하세요. 마크다운 금지.
 
 {{
   "title": "유튜브 제목",
@@ -188,34 +188,62 @@ async def node_pd_harness(state: FactoryState) -> FactoryState:
       "tts_text": "성우 나레이션",
       "subtitle": "압축 자막",
       "image_prompt": "DALL-E 3 영문 프롬프트",
-      "zoom_mode": "in" 
+      "zoom_mode": "in"
     }}
   ]
 }}"""
 
     payload = f"대본: {state['safe_script']}"
     last_err = ""
+    last_raw = ""
     
     for attempt in range(3):
         try:
-            content = await llm_call(LITELLM_GPT, sys_prompt, payload, 0.1, 4000, response_format={"type": "json_object"})
-            parsed = safe_json_extract(content)
+            content = await llm_call(
+                LITELLM_GPT, sys_prompt, payload,
+                0.1, 4000,
+                response_format={"type": "json_object"}
+            )
+            last_raw = content[:500]  # 💡 실제 응답 저장
+            logger.info(f"[PD 시도 {attempt+1}] 원본 응답: {content[:300]}")
             
-            if parsed:
-                blueprint = SsulBlueprint(**parsed) # 💡 여기서 에러가 나면 아래 except로 넘어감
-                state["blueprint"] = blueprint.model_dump()
-                state["agent_status"]["PD_JSON"] = "✅"
-                return state
-            else:
-                raise ValueError("JSON 형식이 아닙니다.")
+            parsed = safe_json_extract(content)
+            if not parsed:
+                raise ValueError(f"JSON 추출 실패. 원본: {content[:200]}")
+            
+            # 💡 scenes가 없거나 빈 경우 방어
+            if "scenes" not in parsed or not parsed["scenes"]:
+                raise ValueError(f"scenes 키 없음. 파싱된 키: {list(parsed.keys())}")
+            
+            # 💡 Pydantic extra 필드 무시 (유연성 확보)
+            class FlexBlueprint(SsulBlueprint):
+                model_config = ConfigDict(extra='ignore')
+            
+            class FlexScene(SceneItem):
+                model_config = ConfigDict(extra='ignore')
+            
+            # scenes 개별 파싱 및 기본값 방어
+            scenes = []
+            for s in parsed.get("scenes", []):
+                try:
+                    scenes.append(FlexScene(**s).model_dump())
+                except Exception as se:
+                    logger.warning(f"씬 파싱 실패 (스킵): {se} | 데이터: {s}")
+                    scenes.append(SceneItem(scene_no=s.get("scene_no", len(scenes)+1)).model_dump())
+            
+            parsed["scenes"] = scenes
+            blueprint = FlexBlueprint(**parsed)
+            state["blueprint"] = blueprint.model_dump()
+            state["agent_status"]["PD_JSON"] = "✅"
+            return state
                 
         except Exception as e:
             last_err = str(e)
             logger.warning(f"PD 교정 에러 ({attempt+1}/3): {e}")
-            payload = f"이전 에러: {e}\n위의 JSON 뼈대를 정확히 지켜서 다시 출력하세요.\n대본: {state['safe_script']}"
+            payload = f"이전 에러: {e}\nJSON 형식 엄수. scenes 배열 필수. 대본: {state['safe_script'][:1000]}"
             
-    # 💡 텔레그램으로 상세 에러 보고
-    state["error"] = f"PD 노드 파싱 실패. 상세에러: {last_err[:200]}"
+    # 💡 텔레그램으로 GPT의 민낯을 그대로 전송
+    state["error"] = f"PD 3회 실패\n에러: {last_err[:300]}\n\nGPT원본: {last_raw}"
     state["agent_status"]["PD_JSON"] = "❌"
     return state
 
@@ -331,7 +359,7 @@ async def run_factory_pipeline(chat_id: int, keyword: Optional[str] = None):
         state = await PIPELINE.ainvoke({"chat_id": chat_id, "keyword": keyword, "character": None, "facts": None, "raw_script": None, "safe_script": None, "blueprint": None, "error": None, "agent_status": {}})
         
         if state.get("error"): 
-            # 💡 실패 원인을 텔레그램으로 직배송
+            # 💡 텔레그램으로 직배송되는 상세 에러 및 원본 로그
             return await bot.send_message(chat_id, f"⚠️ <b>에러 발생:</b>\n<code>{state['error']}</code>", parse_mode=ParseMode.HTML)
         
         bp = state["blueprint"]
@@ -370,4 +398,5 @@ async def webhook(request: Request, bg: BackgroundTasks):
 
 if __name__ == "__main__":
     import uvicorn
+    uvicorn.run("main:app", host="0.0.0.0", port=int(os.environ.get("PORT", 8080)))
     uvicorn.run("main:app", host="0.0.0.0", port=int(os.environ.get("PORT", 8080)))
