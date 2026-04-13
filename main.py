@@ -2,7 +2,7 @@
 SOVEREIGN APEX — SSUL-TUBE FACTORY (ANTI-PATTERN & MONETIZATION EDITION)
 =====================================
 통합 적용:
-  1. [FIX1] LangGraph 파이프라인 개편 (Sourcing -> Research -> Writer(GPT) -> Gemini(감수) -> CRO(Claude) -> PD)
+  1. LangGraph 파이프라인 개편 (Sourcing -> Research -> Writer(GPT) -> Gemini(감수) -> CRO(Claude) -> PD)
   2. Character & Hook Engine: 페르소나 고정 및 첫 3초 훅 강제 설계
   3. Thumbnail Engine: DALL-E 3 CTR 최적화 썸네일 생성 및 API 자동 등록
   4. 방어적 Pydantic 스키마 및 에러 텔레그램 직배송 로직 탑재
@@ -11,10 +11,10 @@ SOVEREIGN APEX — SSUL-TUBE FACTORY (ANTI-PATTERN & MONETIZATION EDITION)
   7. DALL-E 3 공식 해상도 규격(1792x1024) 강제 적용
   8. 누락 이미지 '땜빵(Fallback)' 엔진 탑재
   9. Pillow 버전 충돌 강제 우회 패치 적용
-  10. [FIX2] Cloud Run 쓰기 권한 에러 해결을 위한 모든 에셋 `/tmp` 경로 통일
-  11. [FIX3] TTS 동기 IO 블로킹 해결 (run_in_executor 적용)
-  12. [FIX4] MoviePy TextClip 폰트 절대 경로 적용
-  13. API 과금 없는 '0원 렌더링 단독 테스트(/test)' 모드 탑재
+  10. Cloud Run 쓰기 권한 에러 해결을 위한 모든 에셋 `/tmp` 경로 통일
+  11. MoviePy TextClip 폰트 절대 경로 적용
+  12. API 과금 없는 '0원 렌더링 단독 테스트(/test)' 모드 탑재
+  13. [ULTIMATE HOTFIX] 에러를 유발한 TTS 비동기 로직 제거 및 가장 안정적인 원본 파일 IO로 롤백
 """
 
 import os, json, asyncio, logging, httpx, html, re, time, random
@@ -175,7 +175,6 @@ async def node_writer(state: FactoryState) -> FactoryState:
         state["error"] = f"대본 작성 에러: {e}"
     return state
 
-# 💡 [FIX1] Gemini를 이용한 대본 감수 노드 추가
 async def node_gemini_review(state: FactoryState) -> FactoryState:
     if state.get("error"): return state
     try:
@@ -248,7 +247,7 @@ PIPELINE = StateGraph(FactoryState)
 PIPELINE.add_node("sourcing", node_sourcing)
 PIPELINE.add_node("research", node_research)
 PIPELINE.add_node("writer",   node_writer)
-PIPELINE.add_node("gemini",   node_gemini_review) # 파이프라인에 Gemini 투입
+PIPELINE.add_node("gemini",   node_gemini_review)
 PIPELINE.add_node("cro",      node_cro)
 PIPELINE.add_node("pd",       node_pd_harness)
 
@@ -262,10 +261,9 @@ PIPELINE.add_edge("pd",       END)
 PIPELINE = PIPELINE.compile()
 
 # ============================================================
-# 3. 에셋 생성 엔진 (💡 [FIX2/FIX3] /tmp 경로 적용 및 TTS 비동기 블로킹 방지)
+# 3. 에셋 생성 엔진 (💡 긴급 롤백 완료: TTS 에러 원흉 제거)
 # ============================================================
 async def generate_dalle_image(prompt: str, file_name: str) -> str:
-    # 안전한 /tmp 경로 할당
     safe_path = os.path.join("/tmp", file_name)
     try:
         res = await asyncio.wait_for(
@@ -296,9 +294,8 @@ async def generate_openai_tts(text: str, scene_no: int) -> str:
             ),
             timeout=45.0  
         )
-        # 동기 파일 IO를 스레드 풀로 위임하여 비동기 루프 블로킹 원천 차단
-        loop = asyncio.get_running_loop()
-        await loop.run_in_executor(None, response.stream_to_file, safe_path)
+        # 💡 [HOTFIX] 에러를 일으킨 스레드 풀 할당 방식을 버리고, 과거 무조건 성공했던 방식으로 원상복구
+        response.stream_to_file(safe_path)
         return safe_path
     except asyncio.TimeoutError:
         logger.error(f"TTS 타임아웃: scene {scene_no}")
@@ -318,10 +315,9 @@ def render_final_video(blueprint: dict, img_paths: list, audio_paths: list, out_
     logging.info("🎬 [연출 엔진] 컴포지션 시작")
     safe_out_name = os.path.join("/tmp", out_name)
     try:
-        # 💡 [FIX4] 리눅스 환경의 실제 폰트 절대 경로 적용
         font_path = "/usr/share/fonts/truetype/nanum/NanumGothic.ttf"
         if not os.path.exists(font_path):
-            font_path = "NanumGothic" # 로컬 테스트용 폴백
+            font_path = "NanumGothic" 
             
         clips = []
         last_valid_img = "/tmp/thumbnail.png" if os.path.exists("/tmp/thumbnail.png") else None
@@ -377,7 +373,6 @@ def render_final_video(blueprint: dict, img_paths: list, audio_paths: list, out_
             
         final_video = concatenate_videoclips(clips, method="compose")
         
-        # BGM이 있다면 추가 (경로 주의)
         bgm_path = "bgm_tense.mp3"
         if os.path.exists(bgm_path):
             bgm = AudioFileClip(bgm_path).fx(afx.volumex, random.uniform(0.06, 0.1)).fx(afx.audio_loop, duration=final_video.duration)
