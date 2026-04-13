@@ -9,7 +9,7 @@ openai
 moviepy==1.0.3
 Pillow
 google-api-python-client
-google-auth-httpx
+google-auth-httplib2
 google-auth-oauthlib
 httpx
 pydantic
