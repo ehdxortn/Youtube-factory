@@ -10,13 +10,19 @@ SOVEREIGN APEX — SSUL-TUBE FACTORY (ANTI-PATTERN & MONETIZATION EDITION)
   6. 구간별 상태 보고 및 MoviePy 별도 스레드(Executor) 격리
   7. API 네트워크 무한 대기(Hang) 방지 Async Timeout 강제 적용
   8. DALL-E 3 공식 해상도 규격(1792x1024) 강제 적용
-  9. [ULTIMATE FIX] DALL-E 안전 정책 우회 프롬프트 및 누락 이미지 '땜빵(Fallback)' 엔진 탑재
+  9. 누락 이미지 '땜빵(Fallback)' 엔진 탑재
+  10. [ULTIMATE HOTFIX] Pillow 버전 충돌(ANTIALIAS) 강제 우회 패치 적용
 """
 
 import os, json, asyncio, logging, httpx, html, re, time, random
 from datetime import datetime, timezone
 from typing import Optional, List, Literal, TypedDict
 from pydantic import BaseModel, Field
+
+# 💡 [핵심 조치] MoviePy가 에러를 뿜기 전에 파이썬 심장부의 문법을 강제로 고쳐버립니다.
+import PIL.Image
+if not hasattr(PIL.Image, 'ANTIALIAS'):
+    PIL.Image.ANTIALIAS = PIL.Image.LANCZOS
 
 from fastapi import FastAPI, Request, BackgroundTasks
 from telegram import Update, Bot
@@ -75,13 +81,12 @@ app = FastAPI()
 ALLOWED_IDS = [int(x) for x in get_env("ALLOWED_USER_ID", "0").split(",")]
 openai_client = AsyncOpenAI(api_key=get_env("OPENAI_API_KEY"))
 
-# 💡 DALL-E 안전 정책 우회를 위한 강력한 프롬프트 지침 추가
 HARNESS_CONTEXT = """[SSUL-TUBE HARNESS SYSTEM CORE RULES]
 1. 비식별화 및 검열 우회 100% 적용.
 2. 시각적 일관성: image_prompt에 "Korean webtoon style, dramatic shading" 유지.
 3. 훅(Hook) 강제: 1번 씬은 무조건 가장 자극적인 3초 이내의 결론/반전 스포일러로 배치한다.
 4. 순수 JSON 포맷 강제 (마크다운 금지).
-5. [중요] DALL-E 안전 정책 우회: image_prompt에는 절대 폭력, 피, 흉기, 범죄, 자해, 극단적 혐오 표현을 넣지 마세요. 갈등과 분노는 '어두운 그림자', '깨진 거울', '비 내리는 창문' 등 은유적이고 추상적으로 묘사하세요."""
+5. DALL-E 안전 정책 우회: image_prompt에는 절대 폭력, 피, 흉기, 범죄, 자해, 극단적 혐오 표현을 넣지 마세요. 갈등과 분노는 '어두운 그림자', '깨진 거울', '비 내리는 창문' 등 은유적이고 추상적으로 묘사하세요."""
 
 # ============================================================
 # 1. 스키마 및 State
@@ -281,7 +286,7 @@ async def generate_openai_tts(text: str, scene_no: int) -> str:
         return ""
 
 # ============================================================
-# 4. 렌더링 엔진 (💡 누락 이미지 땜빵(Fallback) 로직 추가)
+# 4. 렌더링 엔진
 # ============================================================
 def create_zoom_effect(clip, duration, mode="in", zoom_ratio=0.05):
     scale_func = lambda t: 1.0 + (zoom_ratio * (t / duration)) if mode == "in" else 1.0 + zoom_ratio - (zoom_ratio * (t / duration))
@@ -293,7 +298,6 @@ def render_final_video(blueprint: dict, img_paths: list, audio_paths: list, out_
         font_path = "Malgun-Gothic" if os.name == 'nt' else "NanumGothic" 
         clips = []
         
-        # 💡 땜빵용 예비 이미지 등록 (썸네일이 있으면 최우선, 없으면 None)
         last_valid_img = "thumbnail.png" if os.path.exists("thumbnail.png") else None
         
         for scene in blueprint.get("scenes", []):
@@ -301,12 +305,10 @@ def render_final_video(blueprint: dict, img_paths: list, audio_paths: list, out_
             img_path = f"scene_{s_no}.png"
             aud_path = f"scene_{s_no}.mp3"
             
-            # 오디오가 없으면 씬 진행 불가 (이건 스킵해야 함)
             if not os.path.exists(aud_path):
                 logging.warning(f"에셋 누락(오디오) 스킵: 씬 {s_no}")
                 continue
                 
-            # 💡 이미지가 DALL-E 검열 등으로 누락되었을 경우 땜빵 처리
             if not os.path.exists(img_path):
                 if last_valid_img and os.path.exists(last_valid_img):
                     logging.warning(f"이미지 검열 누락. 땜빵 이미지 사용: 씬 {s_no}")
@@ -315,7 +317,7 @@ def render_final_video(blueprint: dict, img_paths: list, audio_paths: list, out_
                     logging.warning(f"땜빵용 이미지도 없음. 씬 전체 스킵: 씬 {s_no}")
                     continue
             else:
-                last_valid_img = img_path # 정상 생성되었으면 다음 땜빵용으로 업데이트
+                last_valid_img = img_path 
                 
             audio_clip = AudioFileClip(aud_path)
             dur = audio_clip.duration
