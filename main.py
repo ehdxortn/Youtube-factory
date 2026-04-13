@@ -2,19 +2,17 @@
 SOVEREIGN APEX — SSUL-TUBE FACTORY (ANTI-PATTERN & MONETIZATION EDITION)
 =====================================
 통합 적용:
-  1. LangGraph 파이프라인 개편 (Sourcing -> Research -> Writer(GPT) -> Gemini(감수) -> CRO(Claude) -> PD)
-  2. Character & Hook Engine: 페르소나 고정 및 첫 3초 훅 강제 설계
-  3. Thumbnail Engine: DALL-E 3 CTR 최적화 썸네일 생성 및 API 자동 등록
-  4. 방어적 Pydantic 스키마 및 에러 텔레그램 직배송 로직 탑재
-  5. 구간별 상태 보고 및 MoviePy 별도 스레드(Executor) 격리
-  6. API 네트워크 무한 대기(Hang) 방지 Async Timeout 강제 적용
-  7. DALL-E 3 공식 해상도 규격(1792x1024) 강제 적용
-  8. 누락 이미지 '땜빵(Fallback)' 엔진 탑재
-  9. Pillow 버전 충돌 강제 우회 패치 적용
-  10. Cloud Run 쓰기 권한 에러 해결을 위한 모든 에셋 `/tmp` 경로 통일
-  11. MoviePy TextClip 폰트 절대 경로 적용
-  12. API 과금 없는 '0원 렌더링 단독 테스트(/test)' 모드 탑재
-  13. [ULTIMATE HOTFIX] 에러를 유발한 TTS 비동기 로직 제거 및 가장 안정적인 원본 파일 IO로 롤백
+  1. LangGraph 파이프라인 개편 (Sourcing -> Research -> Writer -> Gemini 감수 -> CRO -> PD)
+  2. Character & Hook Engine 적용
+  3. DALL-E 3 CTR 최적화 썸네일 생성
+  4. 방어적 Pydantic 스키마 및 에러 직배송
+  5. MoviePy 별도 스레드 격리 및 Timeout 강제 적용
+  6. DALL-E 3 공식 해상도 규격(1792x1024) 및 땜빵(Fallback) 엔진
+  7. Cloud Run 쓰기 권한 에러 해결 (`/tmp` 경로 통일)
+  8. TTS 동기 IO 블로킹 해결 (안정성 롤백 버전 적용)
+  9. MoviePy TextClip 폰트 절대 경로 적용
+  10. API 과금 없는 '0원 렌더링 단독 테스트(/test)' 모드 탑재
+  11. [ULTIMATE HOTFIX] MoviePy import 이전 시점에 Pillow(ANTIALIAS) 강제 패치 주입
 """
 
 import os, json, asyncio, logging, httpx, html, re, time, random
@@ -22,10 +20,13 @@ from datetime import datetime, timezone
 from typing import Optional, List, Literal, TypedDict
 from pydantic import BaseModel, Field
 
-import PIL.Image
-if not hasattr(PIL.Image, 'ANTIALIAS'):
-    PIL.Image.ANTIALIAS = PIL.Image.LANCZOS
+# 🔥 [핵심 조치] MoviePy가 로드되기 전에 선제적으로 Pillow 문법을 강제 개조합니다.
+import PIL
+from PIL import Image
+if not hasattr(Image, "ANTIALIAS"):
+    Image.ANTIALIAS = getattr(Image, "Resampling", Image).LANCZOS
 
+# 패치 완료 후 MoviePy 및 나머지 라이브러리 임포트
 from fastapi import FastAPI, Request, BackgroundTasks
 from telegram import Update, Bot
 from telegram.constants import ParseMode
@@ -261,7 +262,7 @@ PIPELINE.add_edge("pd",       END)
 PIPELINE = PIPELINE.compile()
 
 # ============================================================
-# 3. 에셋 생성 엔진 (💡 긴급 롤백 완료: TTS 에러 원흉 제거)
+# 3. 에셋 생성 엔진 
 # ============================================================
 async def generate_dalle_image(prompt: str, file_name: str) -> str:
     safe_path = os.path.join("/tmp", file_name)
@@ -294,7 +295,6 @@ async def generate_openai_tts(text: str, scene_no: int) -> str:
             ),
             timeout=45.0  
         )
-        # 💡 [HOTFIX] 에러를 일으킨 스레드 풀 할당 방식을 버리고, 과거 무조건 성공했던 방식으로 원상복구
         response.stream_to_file(safe_path)
         return safe_path
     except asyncio.TimeoutError:
