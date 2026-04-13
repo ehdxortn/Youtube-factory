@@ -1,18 +1,20 @@
 """
-SOVEREIGN APEX — SSUL-TUBE FACTORY (DEBUGGING & MONETIZATION EDITION)
+SOVEREIGN APEX — SSUL-TUBE FACTORY (ANTI-PATTERN & MONETIZATION EDITION)
 =====================================
 통합 적용:
   1. LangGraph 파이프라인 (Sourcing -> Research -> Writer -> CRO -> PD)
   2. Character & Hook Engine: 페르소나 고정 및 첫 3초 훅 강제 설계
   3. Thumbnail Engine: DALL-E 3 CTR 최적화 썸네일 생성 및 API 자동 등록
-  4. Anti-Pattern Randomizer: 대량생산 필터 회피
-  5. [DEBUG FIX] PD 노드 GPT 원본 응답 추출 및 Pydantic 유연성 극대화 (extra='ignore')
+  4. Anti-Pattern Randomizer: 줌 비율, 자막 크기, 위치 난수화로 대량생산 필터 회피
+  5. 방어적 Pydantic 스키마 및 에러 텔레그램 직배송 로직 탑재
+  6. 구간별 상태 보고 및 MoviePy 별도 스레드(Executor) 격리
+  7. [ULTIMATE FIX] API 네트워크 무한 대기(Hang) 방지를 위한 Async Timeout 강제 적용
 """
 
 import os, json, asyncio, logging, httpx, html, re, time, random
 from datetime import datetime, timezone
 from typing import Optional, List, Literal, TypedDict
-from pydantic import BaseModel, Field, ConfigDict
+from pydantic import BaseModel, Field
 
 from fastapi import FastAPI, Request, BackgroundTasks
 from telegram import Update, Bot
@@ -50,7 +52,7 @@ LITELLM_GEMINI     = "gemini/gemini-3.1-pro"
 LITELLM_PERPLEXITY = "perplexity/sonar-pro"
 
 logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger("SSULTUBE-FACTORY-DEBUG")
+logger = logging.getLogger("SSULTUBE-FACTORY-MONEY")
 
 def get_env(k, default=""):
     v = os.environ.get(k, default)
@@ -85,7 +87,7 @@ class SceneItem(BaseModel):
     tts_text: str = "대본 생성 오류"
     subtitle: str = "자막 누락"
     image_prompt: str = "Korean webtoon style, dramatic shading, intense scene"
-    zoom_mode: str = "in"
+    zoom_mode: str = "in" 
 
 class SsulBlueprint(BaseModel):
     title: str = "기막힌 인생실화"
@@ -106,7 +108,7 @@ class FactoryState(TypedDict):
 
 def safe_json_extract(text: str) -> Optional[dict]:
     try:
-        return json.loads(text)
+        return json.loads(text) 
     except:
         try:
             cleaned = text.replace("```json", "").replace("```", "").strip()
@@ -171,12 +173,12 @@ async def node_cro(state: FactoryState) -> FactoryState:
         state["error"] = f"검열 에러: {e}"
     return state
 
-# 💡 [핵심] 형님의 진단용 PD 하네스 노드 결합
 async def node_pd_harness(state: FactoryState) -> FactoryState:
     if state.get("error"): return state
     
     sys_prompt = f"""{HARNESS_CONTEXT}
-당신은 총괄 PD입니다. 반드시 아래 JSON 형식으로만 출력하세요. 마크다운 금지.
+당신은 총괄 PD입니다. 제공된 대본을 분석하여 반드시 아래의 JSON 형식으로만 출력하세요. 
+마크다운 기호 없이 순수 JSON 객체만 반환해야 합니다.
 
 {{
   "title": "유튜브 제목",
@@ -188,62 +190,33 @@ async def node_pd_harness(state: FactoryState) -> FactoryState:
       "tts_text": "성우 나레이션",
       "subtitle": "압축 자막",
       "image_prompt": "DALL-E 3 영문 프롬프트",
-      "zoom_mode": "in"
+      "zoom_mode": "in" 
     }}
   ]
 }}"""
 
     payload = f"대본: {state['safe_script']}"
     last_err = ""
-    last_raw = ""
     
     for attempt in range(3):
         try:
-            content = await llm_call(
-                LITELLM_GPT, sys_prompt, payload,
-                0.1, 4000,
-                response_format={"type": "json_object"}
-            )
-            last_raw = content[:500]  # 💡 실제 응답 저장
-            logger.info(f"[PD 시도 {attempt+1}] 원본 응답: {content[:300]}")
-            
+            content = await llm_call(LITELLM_GPT, sys_prompt, payload, 0.1, 4000, response_format={"type": "json_object"})
             parsed = safe_json_extract(content)
-            if not parsed:
-                raise ValueError(f"JSON 추출 실패. 원본: {content[:200]}")
             
-            # 💡 scenes가 없거나 빈 경우 방어
-            if "scenes" not in parsed or not parsed["scenes"]:
-                raise ValueError(f"scenes 키 없음. 파싱된 키: {list(parsed.keys())}")
-            
-            # 💡 Pydantic extra 필드 무시 (유연성 확보)
-            class FlexBlueprint(SsulBlueprint):
-                model_config = ConfigDict(extra='ignore')
-            
-            class FlexScene(SceneItem):
-                model_config = ConfigDict(extra='ignore')
-            
-            # scenes 개별 파싱 및 기본값 방어
-            scenes = []
-            for s in parsed.get("scenes", []):
-                try:
-                    scenes.append(FlexScene(**s).model_dump())
-                except Exception as se:
-                    logger.warning(f"씬 파싱 실패 (스킵): {se} | 데이터: {s}")
-                    scenes.append(SceneItem(scene_no=s.get("scene_no", len(scenes)+1)).model_dump())
-            
-            parsed["scenes"] = scenes
-            blueprint = FlexBlueprint(**parsed)
-            state["blueprint"] = blueprint.model_dump()
-            state["agent_status"]["PD_JSON"] = "✅"
-            return state
+            if parsed:
+                blueprint = SsulBlueprint(**parsed) 
+                state["blueprint"] = blueprint.model_dump()
+                state["agent_status"]["PD_JSON"] = "✅"
+                return state
+            else:
+                raise ValueError("JSON 형식이 아닙니다.")
                 
         except Exception as e:
             last_err = str(e)
             logger.warning(f"PD 교정 에러 ({attempt+1}/3): {e}")
-            payload = f"이전 에러: {e}\nJSON 형식 엄수. scenes 배열 필수. 대본: {state['safe_script'][:1000]}"
+            payload = f"이전 에러: {e}\n위의 JSON 뼈대를 정확히 지켜서 다시 출력하세요.\n대본: {state['safe_script']}"
             
-    # 💡 텔레그램으로 GPT의 민낯을 그대로 전송
-    state["error"] = f"PD 3회 실패\n에러: {last_err[:300]}\n\nGPT원본: {last_raw}"
+    state["error"] = f"PD 노드 파싱 실패. 상세에러: {last_err[:200]}"
     state["agent_status"]["PD_JSON"] = "❌"
     return state
 
@@ -262,22 +235,46 @@ PIPELINE.add_edge("pd",       END)
 PIPELINE = PIPELINE.compile()
 
 # ============================================================
-# 3. 에셋 생성 엔진
+# 3. 에셋 생성 엔진 (💡 Timeout Guard 적용 완료)
 # ============================================================
 async def generate_dalle_image(prompt: str, file_name: str) -> str:
     try:
-        res = await openai_client.images.generate(model="dall-e-3", prompt=prompt, size="1024x576", quality="hd", n=1)
-        async with httpx.AsyncClient() as c:
-            with open(file_name, 'wb') as f: f.write((await c.get(res.data[0].url)).content)
+        res = await asyncio.wait_for(
+            openai_client.images.generate(
+                model="dall-e-3", prompt=prompt,
+                size="1024x576", quality="hd", n=1
+            ),
+            timeout=60.0  # 60초 초과 시 중단
+        )
+        async with httpx.AsyncClient(timeout=30.0) as c:
+            img_data = await c.get(res.data[0].url)
+            with open(file_name, 'wb') as f:
+                f.write(img_data.content)
         return file_name
-    except: return ""
+    except asyncio.TimeoutError:
+        logger.error(f"DALL-E 타임아웃: {file_name}")
+        return ""
+    except Exception as e:
+        logger.error(f"DALL-E 에러: {e}")
+        return ""
 
 async def generate_openai_tts(text: str, scene_no: int) -> str:
     path = f"scene_{scene_no}.mp3"
     try:
-        (await openai_client.audio.speech.create(model="tts-1", voice="onyx", input=text)).stream_to_file(path)
+        response = await asyncio.wait_for(
+            openai_client.audio.speech.create(
+                model="tts-1", voice="onyx", input=text
+            ),
+            timeout=45.0  # 45초 초과 시 중단
+        )
+        response.stream_to_file(path)
         return path
-    except: return ""
+    except asyncio.TimeoutError:
+        logger.error(f"TTS 타임아웃: scene {scene_no}")
+        return ""
+    except Exception as e:
+        logger.error(f"TTS 에러: {e}")
+        return ""
 
 # ============================================================
 # 4. 렌더링 엔진 (Anti-Pattern 난수화)
@@ -351,42 +348,76 @@ def upload_to_youtube(video_path: str, thumb_path: str, title: str, tags: list) 
         return False
 
 # ============================================================
-# 6. 메인 컨트롤러
+# 6. 메인 컨트롤러 (💡 구간별 보고 및 Executor 스레드 분리)
 # ============================================================
 async def run_factory_pipeline(chat_id: int, keyword: Optional[str] = None):
     try:
-        await bot.send_message(chat_id, f"🎬 <b>[수익 방어 팩토리 가동]</b> Anti-Pattern 엔진 활성화...", parse_mode=ParseMode.HTML)
-        state = await PIPELINE.ainvoke({"chat_id": chat_id, "keyword": keyword, "character": None, "facts": None, "raw_script": None, "safe_script": None, "blueprint": None, "error": None, "agent_status": {}})
+        await bot.send_message(chat_id, "🎬 <b>[수익 방어 팩토리 가동]</b> Anti-Pattern 엔진 활성화...", parse_mode=ParseMode.HTML)
+        state = await PIPELINE.ainvoke({
+            "chat_id": chat_id, "keyword": keyword, "character": None,
+            "facts": None, "raw_script": None, "safe_script": None,
+            "blueprint": None, "error": None, "agent_status": {}
+        })
         
-        if state.get("error"): 
-            # 💡 텔레그램으로 직배송되는 상세 에러 및 원본 로그
-            return await bot.send_message(chat_id, f"⚠️ <b>에러 발생:</b>\n<code>{state['error']}</code>", parse_mode=ParseMode.HTML)
+        if state.get("error"):
+            return await bot.send_message(chat_id, f"⚠️ <b>파이프라인 에러:</b>\n<code>{html.escape(state['error'])}</code>", parse_mode=ParseMode.HTML)
         
         bp = state["blueprint"]
         await bot.send_message(chat_id, f"✅ 기획 완료. 렌더링 진입.\n제목: {bp.get('title')}\n페르소나: {state['character']}")
 
-        thumb_task = generate_dalle_image(bp.get("thumbnail_prompt", ""), "thumbnail.png")
+        # ── 1단계: 썸네일 생성
+        await bot.send_message(chat_id, "🖼️ [1/4] 썸네일 생성 중...")
+        thumb_path = await generate_dalle_image(bp.get("thumbnail_prompt", ""), "thumbnail.png")
+        await bot.send_message(chat_id, f"{'✅ 썸네일 완료' if thumb_path else '⚠️ 썸네일 실패 (스킵)'}")
+
+        # ── 2단계: 씬 이미지 생성
+        await bot.send_message(chat_id, f"🖼️ [2/4] 씬 이미지 생성 중... ({len(bp['scenes'])}컷)")
         img_tasks = [generate_dalle_image(s["image_prompt"], f"scene_{s['scene_no']}.png") for s in bp["scenes"]]
+        img_paths = await asyncio.gather(*img_tasks)
+        img_paths = [p for p in img_paths if p]
+        await bot.send_message(chat_id, f"✅ 이미지 {len(img_paths)}/{len(bp['scenes'])}컷 완료")
+
+        if not img_paths:
+            return await bot.send_message(chat_id, "❌ 이미지 전체 실패. 중단.")
+
+        # ── 3단계: TTS 생성
+        await bot.send_message(chat_id, "🎙️ [3/4] TTS 나레이션 생성 중...")
         aud_tasks = [generate_openai_tts(s["tts_text"], s["scene_no"]) for s in bp["scenes"]]
+        aud_paths = await asyncio.gather(*aud_tasks)
+        aud_paths = [p for p in aud_paths if p]
+        await bot.send_message(chat_id, f"✅ TTS {len(aud_paths)}/{len(bp['scenes'])}개 완료")
+
+        if not aud_paths:
+            return await bot.send_message(chat_id, "❌ TTS 전체 실패. 중단.")
+
+        # ── 4단계: 렌더링
+        await bot.send_message(chat_id, "🎬 [4/4] 영상 렌더링 중... (수분 소요)")
+        out_name = f"ssul_{int(time.time())}.mp4"
         
-        thumb_path = await thumb_task
-        img_paths = [p for p in await asyncio.gather(*img_tasks) if p]
-        aud_paths = [p for p in await asyncio.gather(*aud_tasks) if p]
-        
-        out = render_final_video(bp, img_paths, aud_paths, f"ssul_{int(time.time())}.mp4")
-        if out:
-            await bot.send_message(chat_id, "🚀 렌더링 완료. 유튜브 서버 배송 및 썸네일 부착 중...")
-            if upload_to_youtube(out, thumb_path, bp.get("title"), bp.get("seo_tags", [])):
-                await bot.send_message(chat_id, "✅ 수익화 방어 규격 영상 및 썸네일 업로드 완료.")
-            
-            try:
-                os.remove(out)
-                if os.path.exists(thumb_path): os.remove(thumb_path)
-                for p in img_paths + aud_paths: os.remove(p)
-            except: pass
+        try:
+            loop = asyncio.get_running_loop()
+            out = await loop.run_in_executor(None, render_final_video, bp, img_paths, aud_paths, out_name)
+        except Exception as re:
+            return await bot.send_message(chat_id, f"❌ 렌더링 에러:\n<code>{html.escape(str(re))}</code>", parse_mode=ParseMode.HTML)
+
+        if not out or not os.path.exists(out):
+            return await bot.send_message(chat_id, "❌ 렌더링 결과물 없음. MoviePy 로그 확인 필요.")
+
+        # ── 5단계: 유튜브 업로드
+        await bot.send_message(chat_id, "🚀 유튜브 업로드 중...")
+        if upload_to_youtube(out, thumb_path, bp.get("title"), bp.get("seo_tags", [])):
+            await bot.send_message(chat_id, "✅ 업로드 완료.")
+        else:
+            await bot.send_message(chat_id, "⚠️ 유튜브 업로드 실패. (token.json 확인)")
+
+        # ── 정리
+        try:
+            for f in [out, thumb_path] + img_paths + aud_paths:
+                if f and os.path.exists(f): os.remove(f)
+        except: pass
 
     except Exception as e:
-        await bot.send_message(chat_id, f"⚠️ 공장 셧다운: {html.escape(str(e))}")
+        await bot.send_message(chat_id, f"⚠️ 공장 셧다운: <code>{html.escape(str(e))}</code>", parse_mode=ParseMode.HTML)
 
 @app.post("/webhook")
 async def webhook(request: Request, bg: BackgroundTasks):
@@ -398,5 +429,4 @@ async def webhook(request: Request, bg: BackgroundTasks):
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("main:app", host="0.0.0.0", port=int(os.environ.get("PORT", 8080)))
     uvicorn.run("main:app", host="0.0.0.0", port=int(os.environ.get("PORT", 8080)))
