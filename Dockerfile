@@ -8,20 +8,14 @@ RUN apt-get update && apt-get install -y \
     fonts-nanum \
     && rm -rf /var/lib/apt/lists/*
 
-# 3. ImageMagick 텍스트 렌더링 보안 권한 해제 
-RUN sed -i 's/rights="none" pattern="@\*"/rights="read|write" pattern="@*"/g' /etc/ImageMagick-6/policy.xml || true
-RUN sed -i '/<policy domain="path" rights="none" pattern="@\*"/d' /etc/ImageMagick-6/policy.xml || true
-ENV IMAGEMAGICK_BINARY=/usr/bin/convert
+# 3. 에러의 원흉인 ImageMagick 보안 파일 강제 삭제 (가장 확실한 자막 에러 해결법)
+RUN rm -f /etc/ImageMagick-6/policy.xml || true
 
+# 4. 작업 폴더 및 파이썬 패키지 설치
 WORKDIR /app
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
 
-# 4. 💡 무한 루프(타임아웃) 방지를 위한 패키지 분할 고속 설치
-RUN pip install --upgrade pip setuptools wheel
-RUN pip install --no-cache-dir fastapi uvicorn pydantic httpx
-RUN pip install --no-cache-dir litellm langgraph langfuse openai
-RUN pip install --no-cache-dir google-api-python-client google-auth-oauthlib
-RUN pip install --no-cache-dir python-telegram-bot==20.3 moviepy==1.0.3
-
-# 5. 소스코드 복사 및 메인 서버 가동
+# 5. 소스코드 복사 및 가동
 COPY . .
 CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8080"]
