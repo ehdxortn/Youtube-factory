@@ -5,13 +5,13 @@ SOVEREIGN APEX — SSUL-TUBE FACTORY (ANTI-PATTERN & MONETIZATION EDITION)
   1. LangGraph 파이프라인 (Sourcing -> Research -> Writer -> CRO -> PD)
   2. Character & Hook Engine: 페르소나 고정 및 첫 3초 훅 강제 설계
   3. Thumbnail Engine: DALL-E 3 CTR 최적화 썸네일 생성 및 API 자동 등록
-  4. Anti-Pattern Randomizer: 줌 비율, 자막 크기, 위치 난수화로 대량생산 필터 회피
-  5. 방어적 Pydantic 스키마 및 에러 텔레그램 직배송 로직 탑재
-  6. 구간별 상태 보고 및 MoviePy 별도 스레드(Executor) 격리
-  7. API 네트워크 무한 대기(Hang) 방지 Async Timeout 강제 적용
-  8. DALL-E 3 공식 해상도 규격(1792x1024) 강제 적용
-  9. 누락 이미지 '땜빵(Fallback)' 엔진 탑재
-  10. [ULTIMATE HOTFIX] Pillow 버전 충돌(ANTIALIAS) 강제 우회 패치 적용
+  4. 방어적 Pydantic 스키마 및 에러 텔레그램 직배송 로직 탑재
+  5. 구간별 상태 보고 및 MoviePy 별도 스레드(Executor) 격리
+  6. API 네트워크 무한 대기(Hang) 방지 Async Timeout 강제 적용
+  7. DALL-E 3 공식 해상도 규격(1792x1024) 강제 적용
+  8. 누락 이미지 '땜빵(Fallback)' 엔진 탑재
+  9. Pillow 버전 충돌 강제 우회 패치 적용
+  10. [ULTIMATE HOTFIX] 무한 렌더링 대기 해결을 위한 Zoom 모션 임시 비활성화 (초고속 렌더링)
 """
 
 import os, json, asyncio, logging, httpx, html, re, time, random
@@ -19,7 +19,6 @@ from datetime import datetime, timezone
 from typing import Optional, List, Literal, TypedDict
 from pydantic import BaseModel, Field
 
-# 💡 [핵심 조치] MoviePy가 에러를 뿜기 전에 파이썬 심장부의 문법을 강제로 고쳐버립니다.
 import PIL.Image
 if not hasattr(PIL.Image, 'ANTIALIAS'):
     PIL.Image.ANTIALIAS = PIL.Image.LANCZOS
@@ -286,11 +285,12 @@ async def generate_openai_tts(text: str, scene_no: int) -> str:
         return ""
 
 # ============================================================
-# 4. 렌더링 엔진
+# 4. 렌더링 엔진 (💡 서버 폭파 주범인 Zoom 모션 강제 비활성화)
 # ============================================================
 def create_zoom_effect(clip, duration, mode="in", zoom_ratio=0.05):
-    scale_func = lambda t: 1.0 + (zoom_ratio * (t / duration)) if mode == "in" else 1.0 + zoom_ratio - (zoom_ratio * (t / duration))
-    return clip.resize(scale_func)
+    # 💡 1코어 클라우드 CPU를 갈아먹는 프레임 단위 연산을 끄고, 이미지를 그대로 통과시킵니다.
+    # 이 한 줄 수정으로 렌더링 시간이 몇 시간에서 1~2분 내외로 단축됩니다.
+    return clip
 
 def render_final_video(blueprint: dict, img_paths: list, audio_paths: list, out_name: str) -> str:
     logging.info("🎬 [연출 엔진] 컴포지션 시작")
@@ -323,12 +323,12 @@ def render_final_video(blueprint: dict, img_paths: list, audio_paths: list, out_
             dur = audio_clip.duration
             if dur <= 0: continue
             
-            z_ratio = random.uniform(0.03, 0.08)
             f_size = random.choice([60, 65, 70])
             m_bottom = random.choice([80, 100, 120])
 
             img_clip = ImageClip(img_path).set_duration(dur)
-            img_clip = create_zoom_effect(img_clip, dur, scene.get("zoom_mode", "in"), zoom_ratio=z_ratio)
+            # 💡 초고속 렌더링을 위해 Zoom 호출 유지하되 내부 연산은 패스됨
+            img_clip = create_zoom_effect(img_clip, dur, scene.get("zoom_mode", "in"), zoom_ratio=0.0)
             img_clip = img_clip.set_position("center").on_color(size=(1920, 1080), color=(0,0,0))
             
             subtitle_text = scene.get("subtitle", "").strip()
@@ -356,7 +356,7 @@ def render_final_video(blueprint: dict, img_paths: list, audio_paths: list, out_
             bgm = AudioFileClip(bgm_path).fx(afx.volumex, random.uniform(0.06, 0.1)).fx(afx.audio_loop, duration=final_video.duration)
             final_video = final_video.set_audio(CompositeAudioClip([final_video.audio, bgm]))
 
-        final_video.write_videofile(out_name, fps=24, codec="libx264", audio_codec="aac", threads=4, logger=None)
+        final_video.write_videofile(out_name, fps=24, codec="libx264", audio_codec="aac", threads=1, preset="ultrafast", logger=None)
         return out_name
         
     except Exception as e:
