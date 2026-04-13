@@ -8,7 +8,8 @@ SOVEREIGN APEX — SSUL-TUBE FACTORY (ANTI-PATTERN & MONETIZATION EDITION)
   4. Anti-Pattern Randomizer: 줌 비율, 자막 크기, 위치 난수화로 대량생산 필터 회피
   5. 방어적 Pydantic 스키마 및 에러 텔레그램 직배송 로직 탑재
   6. 구간별 상태 보고 및 MoviePy 별도 스레드(Executor) 격리
-  7. [ULTIMATE FIX] API 네트워크 무한 대기(Hang) 방지를 위한 Async Timeout 강제 적용
+  7. API 네트워크 무한 대기(Hang) 방지를 위한 Async Timeout 강제 적용
+  8. [ULTIMATE FIX] MoviePy 빈 자막 크래시 방어 및 Zoom 모션 메모리 누수 최적화
 """
 
 import os, json, asyncio, logging, httpx, html, re, time, random
@@ -235,7 +236,7 @@ PIPELINE.add_edge("pd",       END)
 PIPELINE = PIPELINE.compile()
 
 # ============================================================
-# 3. 에셋 생성 엔진 (💡 Timeout Guard 적용 완료)
+# 3. 에셋 생성 엔진
 # ============================================================
 async def generate_dalle_image(prompt: str, file_name: str) -> str:
     try:
@@ -244,7 +245,7 @@ async def generate_dalle_image(prompt: str, file_name: str) -> str:
                 model="dall-e-3", prompt=prompt,
                 size="1024x576", quality="hd", n=1
             ),
-            timeout=60.0  # 60초 초과 시 중단
+            timeout=60.0  
         )
         async with httpx.AsyncClient(timeout=30.0) as c:
             img_data = await c.get(res.data[0].url)
@@ -265,7 +266,7 @@ async def generate_openai_tts(text: str, scene_no: int) -> str:
             openai_client.audio.speech.create(
                 model="tts-1", voice="onyx", input=text
             ),
-            timeout=45.0  # 45초 초과 시 중단
+            timeout=45.0  
         )
         response.stream_to_file(path)
         return path
@@ -277,38 +278,59 @@ async def generate_openai_tts(text: str, scene_no: int) -> str:
         return ""
 
 # ============================================================
-# 4. 렌더링 엔진 (Anti-Pattern 난수화)
+# 4. 렌더링 엔진 (💡 방어적 로직 및 줌 메모리 최적화 탑재)
 # ============================================================
 def create_zoom_effect(clip, duration, mode="in", zoom_ratio=0.05):
-    def effect(get_frame, t):
-        img = ImageClip(get_frame(t))
-        scale = 1.0 + (zoom_ratio * (t / duration)) if mode == "in" else 1.0 + zoom_ratio - (zoom_ratio * (t / duration))
-        return img.resize(scale).get_frame(t)
-    return clip.fl(effect)
+    # 💡 이전처럼 ImageClip을 매 프레임 새로 생성하지 않고 네이티브 resize 활용 (메모리 최적화)
+    scale_func = lambda t: 1.0 + (zoom_ratio * (t / duration)) if mode == "in" else 1.0 + zoom_ratio - (zoom_ratio * (t / duration))
+    return clip.resize(scale_func)
 
 def render_final_video(blueprint: dict, img_paths: list, audio_paths: list, out_name: str) -> str:
     logging.info("🎬 [연출 엔진] 컴포지션 시작")
     try:
         font_path = "Malgun-Gothic" if os.name == 'nt' else "NanumGothic" 
         clips = []
-        for i, scene in enumerate(blueprint.get("scenes", [])):
-            if i >= len(img_paths) or i >= len(audio_paths): break
-            audio_clip = AudioFileClip(audio_paths[i])
+        
+        for scene in blueprint.get("scenes", []):
+            s_no = scene.get("scene_no", 1)
+            img_path = f"scene_{s_no}.png"
+            aud_path = f"scene_{s_no}.mp3"
+            
+            # 💡 에셋 누락 시 해당 씬 스킵 (리스트 길이에 의존하여 엇박자 나는 현상 방지)
+            if not os.path.exists(img_path) or not os.path.exists(aud_path):
+                logging.warning(f"에셋 누락 스킵: 씬 {s_no}")
+                continue
+                
+            audio_clip = AudioFileClip(aud_path)
             dur = audio_clip.duration
+            if dur <= 0: continue
             
             z_ratio = random.uniform(0.03, 0.08)
             f_size = random.choice([60, 65, 70])
             m_bottom = random.choice([80, 100, 120])
 
-            img_clip = ImageClip(img_paths[i]).set_duration(dur)
+            img_clip = ImageClip(img_path).set_duration(dur)
             img_clip = create_zoom_effect(img_clip, dur, scene.get("zoom_mode", "in"), zoom_ratio=z_ratio)
             img_clip = img_clip.set_position("center").on_color(size=(1920, 1080), color=(0,0,0))
             
-            txt_clip = TextClip(scene.get("subtitle", ""), fontsize=f_size, color='white', font=font_path, stroke_color='black', stroke_width=2)
-            txt_clip = txt_clip.set_position(('center', 'bottom')).margin(bottom=m_bottom, opacity=0).set_duration(dur)
+            subtitle_text = scene.get("subtitle", "").strip()
             
-            video_comp = CompositeVideoClip([img_clip, txt_clip], size=(1920, 1080)).set_audio(audio_clip)
+            # 💡 자막이 비어있으면 렌더링 에러가 나므로, 자막이 있을 때만 텍스트 클립 합성
+            if subtitle_text:
+                try:
+                    txt_clip = TextClip(subtitle_text, fontsize=f_size, color='white', font=font_path, stroke_color='black', stroke_width=2)
+                    txt_clip = txt_clip.set_position(('center', 'bottom')).margin(bottom=m_bottom, opacity=0).set_duration(dur)
+                    video_comp = CompositeVideoClip([img_clip, txt_clip], size=(1920, 1080)).set_audio(audio_clip)
+                except Exception as text_e:
+                    logging.error(f"TextClip 에러 (자막 없이 진행): {text_e}")
+                    video_comp = CompositeVideoClip([img_clip], size=(1920, 1080)).set_audio(audio_clip)
+            else:
+                video_comp = CompositeVideoClip([img_clip], size=(1920, 1080)).set_audio(audio_clip)
+                
             clips.append(video_comp)
+            
+        if not clips:
+            raise ValueError("합성할 유효한 씬이 없습니다. (에셋 생성 모두 실패)")
             
         final_video = concatenate_videoclips(clips, method="compose")
         
@@ -319,9 +341,10 @@ def render_final_video(blueprint: dict, img_paths: list, audio_paths: list, out_
 
         final_video.write_videofile(out_name, fps=24, codec="libx264", audio_codec="aac", threads=4, logger=None)
         return out_name
+        
     except Exception as e:
-        logging.error(f"렌더링 에러: {e}")
-        return ""
+        logging.error(f"렌더링 에러: {e}", exc_info=True)
+        raise e # 💡 에러를 그대로 위로 던져서 텔레그램 채팅창에 원문이 찍히도록 함
 
 # ============================================================
 # 5. 유튜브 업로드
@@ -332,101 +355,4 @@ def upload_to_youtube(video_path: str, thumb_path: str, title: str, tags: list) 
         from googleapiclient.discovery import build
         from googleapiclient.http import MediaFileUpload
         from google.oauth2.credentials import Credentials
-        creds = Credentials.from_authorized_user_file('token.json', ['https://www.googleapis.com/auth/youtube.upload'])
-        youtube = build('youtube', 'v3', credentials=creds)
-        body = {'snippet': {'title': title, 'description': "실화 바탕 썰다큐입니다.\n#사건사고 #썰튜브", 'tags': tags, 'categoryId': '24'}, 'status': {'privacyStatus': 'public'}}
-        
-        video_response = youtube.videos().insert(part=','.join(body.keys()), body=body, media_body=MediaFileUpload(video_path, chunksize=-1, resumable=True, mimetype='video/mp4')).execute()
-        video_id = video_response.get("id")
-        
-        if video_id and os.path.exists(thumb_path):
-            youtube.thumbnails().set(videoId=video_id, media_body=MediaFileUpload(thumb_path)).execute()
-            
-        return True
-    except Exception as e:
-        logger.error(f"유튜브 업로드 실패: {e}")
-        return False
-
-# ============================================================
-# 6. 메인 컨트롤러 (💡 구간별 보고 및 Executor 스레드 분리)
-# ============================================================
-async def run_factory_pipeline(chat_id: int, keyword: Optional[str] = None):
-    try:
-        await bot.send_message(chat_id, "🎬 <b>[수익 방어 팩토리 가동]</b> Anti-Pattern 엔진 활성화...", parse_mode=ParseMode.HTML)
-        state = await PIPELINE.ainvoke({
-            "chat_id": chat_id, "keyword": keyword, "character": None,
-            "facts": None, "raw_script": None, "safe_script": None,
-            "blueprint": None, "error": None, "agent_status": {}
-        })
-        
-        if state.get("error"):
-            return await bot.send_message(chat_id, f"⚠️ <b>파이프라인 에러:</b>\n<code>{html.escape(state['error'])}</code>", parse_mode=ParseMode.HTML)
-        
-        bp = state["blueprint"]
-        await bot.send_message(chat_id, f"✅ 기획 완료. 렌더링 진입.\n제목: {bp.get('title')}\n페르소나: {state['character']}")
-
-        # ── 1단계: 썸네일 생성
-        await bot.send_message(chat_id, "🖼️ [1/4] 썸네일 생성 중...")
-        thumb_path = await generate_dalle_image(bp.get("thumbnail_prompt", ""), "thumbnail.png")
-        await bot.send_message(chat_id, f"{'✅ 썸네일 완료' if thumb_path else '⚠️ 썸네일 실패 (스킵)'}")
-
-        # ── 2단계: 씬 이미지 생성
-        await bot.send_message(chat_id, f"🖼️ [2/4] 씬 이미지 생성 중... ({len(bp['scenes'])}컷)")
-        img_tasks = [generate_dalle_image(s["image_prompt"], f"scene_{s['scene_no']}.png") for s in bp["scenes"]]
-        img_paths = await asyncio.gather(*img_tasks)
-        img_paths = [p for p in img_paths if p]
-        await bot.send_message(chat_id, f"✅ 이미지 {len(img_paths)}/{len(bp['scenes'])}컷 완료")
-
-        if not img_paths:
-            return await bot.send_message(chat_id, "❌ 이미지 전체 실패. 중단.")
-
-        # ── 3단계: TTS 생성
-        await bot.send_message(chat_id, "🎙️ [3/4] TTS 나레이션 생성 중...")
-        aud_tasks = [generate_openai_tts(s["tts_text"], s["scene_no"]) for s in bp["scenes"]]
-        aud_paths = await asyncio.gather(*aud_tasks)
-        aud_paths = [p for p in aud_paths if p]
-        await bot.send_message(chat_id, f"✅ TTS {len(aud_paths)}/{len(bp['scenes'])}개 완료")
-
-        if not aud_paths:
-            return await bot.send_message(chat_id, "❌ TTS 전체 실패. 중단.")
-
-        # ── 4단계: 렌더링
-        await bot.send_message(chat_id, "🎬 [4/4] 영상 렌더링 중... (수분 소요)")
-        out_name = f"ssul_{int(time.time())}.mp4"
-        
-        try:
-            loop = asyncio.get_running_loop()
-            out = await loop.run_in_executor(None, render_final_video, bp, img_paths, aud_paths, out_name)
-        except Exception as re:
-            return await bot.send_message(chat_id, f"❌ 렌더링 에러:\n<code>{html.escape(str(re))}</code>", parse_mode=ParseMode.HTML)
-
-        if not out or not os.path.exists(out):
-            return await bot.send_message(chat_id, "❌ 렌더링 결과물 없음. MoviePy 로그 확인 필요.")
-
-        # ── 5단계: 유튜브 업로드
-        await bot.send_message(chat_id, "🚀 유튜브 업로드 중...")
-        if upload_to_youtube(out, thumb_path, bp.get("title"), bp.get("seo_tags", [])):
-            await bot.send_message(chat_id, "✅ 업로드 완료.")
-        else:
-            await bot.send_message(chat_id, "⚠️ 유튜브 업로드 실패. (token.json 확인)")
-
-        # ── 정리
-        try:
-            for f in [out, thumb_path] + img_paths + aud_paths:
-                if f and os.path.exists(f): os.remove(f)
-        except: pass
-
-    except Exception as e:
-        await bot.send_message(chat_id, f"⚠️ 공장 셧다운: <code>{html.escape(str(e))}</code>", parse_mode=ParseMode.HTML)
-
-@app.post("/webhook")
-async def webhook(request: Request, bg: BackgroundTasks):
-    msg = Update.de_json(await request.json(), bot).message
-    if msg and (msg.from_user.id in ALLOWED_IDS) and msg.text:
-        if msg.text.startswith("/make "): bg.add_task(run_factory_pipeline, msg.chat.id, msg.text.replace("/make ", "").strip())
-        elif msg.text == "/auto": bg.add_task(run_factory_pipeline, msg.chat.id)
-    return {"ok": True}
-
-if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run("main:app", host="0.0.0.0", port=int(os.environ.get("PORT", 8080)))
+        creds = Credentials.from_authorized_user_file('token.json
