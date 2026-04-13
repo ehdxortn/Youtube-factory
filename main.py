@@ -10,6 +10,7 @@ SOVEREIGN APEX — SSUL-TUBE FACTORY (ANTI-PATTERN & MONETIZATION EDITION)
   6. 구간별 상태 보고 및 MoviePy 별도 스레드(Executor) 격리
   7. API 네트워크 무한 대기(Hang) 방지를 위한 Async Timeout 강제 적용
   8. MoviePy 빈 자막 크래시 방어 및 Zoom 모션 메모리 누수 최적화
+  9. [HOTFIX] DALL-E 3 공식 해상도 규격(1792x1024) 강제 적용 (입구컷 에러 해결)
 """
 
 import os, json, asyncio, logging, httpx, html, re, time, random
@@ -236,14 +237,14 @@ PIPELINE.add_edge("pd",       END)
 PIPELINE = PIPELINE.compile()
 
 # ============================================================
-# 3. 에셋 생성 엔진 (💡 Timeout Guard 적용 완료)
+# 3. 에셋 생성 엔진 (💡 DALL-E 3 사이즈 오류 수정)
 # ============================================================
 async def generate_dalle_image(prompt: str, file_name: str) -> str:
     try:
         res = await asyncio.wait_for(
             openai_client.images.generate(
                 model="dall-e-3", prompt=prompt,
-                size="1024x576", quality="hd", n=1
+                size="1792x1024", quality="hd", n=1  # 💡 규격에 맞는 공식 16:9 해상도로 변경
             ),
             timeout=60.0  
         )
@@ -278,7 +279,7 @@ async def generate_openai_tts(text: str, scene_no: int) -> str:
         return ""
 
 # ============================================================
-# 4. 렌더링 엔진 (💡 방어적 로직 및 줌 메모리 최적화 탑재)
+# 4. 렌더링 엔진 
 # ============================================================
 def create_zoom_effect(clip, duration, mode="in", zoom_ratio=0.05):
     scale_func = lambda t: 1.0 + (zoom_ratio * (t / duration)) if mode == "in" else 1.0 + zoom_ratio - (zoom_ratio * (t / duration))
@@ -368,7 +369,7 @@ def upload_to_youtube(video_path: str, thumb_path: str, title: str, tags: list) 
         return False
 
 # ============================================================
-# 6. 메인 컨트롤러 (💡 구간별 보고 및 Executor 스레드 분리)
+# 6. 메인 컨트롤러
 # ============================================================
 async def run_factory_pipeline(chat_id: int, keyword: Optional[str] = None):
     try:
