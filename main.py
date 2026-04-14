@@ -7,12 +7,13 @@ SOVEREIGN APEX — SSUL-TUBE FACTORY (ANTI-PATTERN & MONETIZATION EDITION)
   3. DALL-E 3 CTR 최적화 썸네일 생성
   4. 방어적 Pydantic 스키마 및 에러 직배송
   5. MoviePy 별도 스레드 격리 및 Timeout 강제 적용
-  6. DALL-E 3 공식 해상도 규격(1792x1024) 및 땜빵(Fallback) 엔진
+  6. DALL-E 3 공식 해상도 규격(1792x1024) 적용
   7. Cloud Run 쓰기 권한 에러 해결 (`/tmp` 경로 통일)
-  8. TTS 동기 IO 블로킹 해결 (안정성 롤백 버전 적용)
+  8. TTS 동기 IO 블로킹 해결
   9. MoviePy TextClip 폰트 절대 경로 적용
-  10. API 과금 없는 '0원 렌더링 단독 테스트(/test)' 모드 탑재
-  11. [ULTIMATE HOTFIX] MoviePy import 이전 시점에 Pillow(ANTIALIAS) 강제 패치 주입
+  10. MoviePy import 이전 시점에 Pillow(ANTIALIAS) 강제 패치 주입
+  11. [NEW] DALL-E 재시도(Retry) 엔진 탑재: 에러 시 최대 3회 재요청으로 생성 보장
+  12. [NEW] 완벽주의 손절(Fail-Fast) 로직: 이미지 1장이라도 누락 시 즉각 공장 셧다운 및 렌더링 중단
 """
 
 import os, json, asyncio, logging, httpx, html, re, time, random
@@ -26,7 +27,6 @@ from PIL import Image
 if not hasattr(Image, "ANTIALIAS"):
     Image.ANTIALIAS = getattr(Image, "Resampling", Image).LANCZOS
 
-# 패치 완료 후 MoviePy 및 나머지 라이브러리 임포트
 from fastapi import FastAPI, Request, BackgroundTasks
 from telegram import Update, Bot
 from telegram.constants import ParseMode
@@ -262,29 +262,36 @@ PIPELINE.add_edge("pd",       END)
 PIPELINE = PIPELINE.compile()
 
 # ============================================================
-# 3. 에셋 생성 엔진 
+# 3. 에셋 생성 엔진 (💡 3회 재시도 무결성 로직 탑재)
 # ============================================================
-async def generate_dalle_image(prompt: str, file_name: str) -> str:
+async def generate_dalle_image(prompt: str, file_name: str, max_retries: int = 3) -> str:
     safe_path = os.path.join("/tmp", file_name)
-    try:
-        res = await asyncio.wait_for(
-            openai_client.images.generate(
-                model="dall-e-3", prompt=prompt,
-                size="1792x1024", quality="hd", n=1 
-            ),
-            timeout=60.0  
-        )
-        async with httpx.AsyncClient(timeout=30.0) as c:
-            img_data = await c.get(res.data[0].url)
-            with open(safe_path, 'wb') as f:
-                f.write(img_data.content)
-        return safe_path
-    except asyncio.TimeoutError:
-        logger.error(f"DALL-E 타임아웃: {safe_path}")
-        return ""
-    except Exception as e:
-        logger.error(f"DALL-E 에러: {e}")
-        return ""
+    
+    for attempt in range(max_retries):
+        try:
+            res = await asyncio.wait_for(
+                openai_client.images.generate(
+                    model="dall-e-3", prompt=prompt,
+                    size="1792x1024", quality="hd", n=1 
+                ),
+                timeout=60.0  
+            )
+            async with httpx.AsyncClient(timeout=30.0) as c:
+                img_data = await c.get(res.data[0].url)
+                with open(safe_path, 'wb') as f:
+                    f.write(img_data.content)
+            return safe_path # 성공 시 즉시 반환
+            
+        except asyncio.TimeoutError:
+            logger.warning(f"DALL-E 타임아웃 (시도 {attempt+1}/{max_retries}): {safe_path}")
+        except Exception as e:
+            logger.warning(f"DALL-E 생성 에러 (시도 {attempt+1}/{max_retries}): {e}")
+            
+        if attempt < max_retries - 1:
+            await asyncio.sleep(3 * (attempt + 1)) # 실패 시 3초, 6초 대기 후 재시도
+            
+    logger.error(f"❌ DALL-E 최종 실패: {safe_path}")
+    return "" # 3번 다 실패하면 빈 문자열 반환
 
 async def generate_openai_tts(text: str, scene_no: int) -> str:
     safe_path = f"/tmp/scene_{scene_no}.mp3"
@@ -305,7 +312,7 @@ async def generate_openai_tts(text: str, scene_no: int) -> str:
         return ""
 
 # ============================================================
-# 4. 렌더링 엔진 
+# 4. 렌더링 엔진 (💡 이미지 누락 시 가차 없이 에러 뱉고 렌더링 중단)
 # ============================================================
 def create_zoom_effect(clip, duration, mode="in", zoom_ratio=0.05):
     scale_func = lambda t: 1.0 + (zoom_ratio * (t / duration)) if mode == "in" else 1.0 + zoom_ratio - (zoom_ratio * (t / duration))
@@ -320,7 +327,6 @@ def render_final_video(blueprint: dict, img_paths: list, audio_paths: list, out_
             font_path = "NanumGothic" 
             
         clips = []
-        last_valid_img = "/tmp/thumbnail.png" if os.path.exists("/tmp/thumbnail.png") else None
         
         for scene in blueprint.get("scenes", []):
             s_no = scene.get("scene_no", 1)
@@ -328,18 +334,11 @@ def render_final_video(blueprint: dict, img_paths: list, audio_paths: list, out_
             aud_path = f"/tmp/scene_{s_no}.mp3"
             
             if not os.path.exists(aud_path):
-                logging.warning(f"에셋 누락(오디오) 스킵: 씬 {s_no}")
-                continue
+                raise ValueError(f"치명적 오류: 씬 {s_no} 오디오가 없습니다. 불량품 렌더링을 차단합니다.")
                 
+            # 💡 형님의 철학 반영: 이미지가 하나라도 물리적으로 없으면 땜빵 없이 렌더링 강제 파기
             if not os.path.exists(img_path):
-                if last_valid_img and os.path.exists(last_valid_img):
-                    logging.warning(f"이미지 검열 누락. 땜빵 이미지 사용: 씬 {s_no}")
-                    img_path = last_valid_img
-                else:
-                    logging.warning(f"땜빵용 이미지도 없음. 씬 전체 스킵: 씬 {s_no}")
-                    continue
-            else:
-                last_valid_img = img_path 
+                raise ValueError(f"치명적 오류: 씬 {s_no} 이미지가 누락되었습니다. 영상 완성의 의미가 없으므로 렌더링을 강제 취소합니다.")
                 
             audio_clip = AudioFileClip(aud_path)
             dur = audio_clip.duration
@@ -369,7 +368,7 @@ def render_final_video(blueprint: dict, img_paths: list, audio_paths: list, out_
             clips.append(video_comp)
             
         if not clips:
-            raise ValueError("합성할 유효한 씬이 없습니다. (오디오 생성 모두 실패)")
+            raise ValueError("합성할 유효한 씬이 없습니다.")
             
         final_video = concatenate_videoclips(clips, method="compose")
         
@@ -414,7 +413,7 @@ def upload_to_youtube(video_path: str, thumb_path: str, title: str, tags: list) 
 # ============================================================
 async def run_factory_pipeline(chat_id: int, keyword: Optional[str] = None):
     try:
-        await bot.send_message(chat_id, "🎬 <b>[수익 방어 팩토리 가동]</b> Anti-Pattern 엔진 활성화...", parse_mode=ParseMode.HTML)
+        await bot.send_message(chat_id, "🎬 <b>[수익 방어 팩토리 가동]</b> 무결성 엔진 활성화...", parse_mode=ParseMode.HTML)
         state = await PIPELINE.ainvoke({
             "chat_id": chat_id, "keyword": keyword, "character": None,
             "facts": None, "raw_script": None, "safe_script": None,
@@ -425,30 +424,34 @@ async def run_factory_pipeline(chat_id: int, keyword: Optional[str] = None):
             return await bot.send_message(chat_id, f"⚠️ <b>파이프라인 에러:</b>\n<code>{html.escape(state['error'])}</code>", parse_mode=ParseMode.HTML)
         
         bp = state["blueprint"]
-        await bot.send_message(chat_id, f"✅ 기획 완료. 렌더링 진입.\n제목: {bp.get('title')}\n페르소나: {state['character']}")
+        await bot.send_message(chat_id, f"✅ 기획 완료. 에셋 생성 진입.\n제목: {bp.get('title')}\n페르소나: {state['character']}")
 
         await bot.send_message(chat_id, "🖼️ [1/4] 썸네일 생성 중...")
         thumb_path = await generate_dalle_image(bp.get("thumbnail_prompt", ""), "thumbnail.png")
-        await bot.send_message(chat_id, f"{'✅ 썸네일 완료' if thumb_path else '⚠️ 썸네일 실패 (스킵)'}")
+        if not thumb_path:
+            return await bot.send_message(chat_id, "❌ 썸네일 생성 영구 실패. 완성도 유지를 위해 공장을 중단합니다.")
+        await bot.send_message(chat_id, "✅ 썸네일 완료")
 
         await bot.send_message(chat_id, f"🖼️ [2/4] 씬 이미지 생성 중... ({len(bp['scenes'])}컷)")
         img_paths = []
         for s in bp["scenes"]:
             p = await generate_dalle_image(s["image_prompt"], f"scene_{s['scene_no']}.png")
-            if p: img_paths.append(p)
-            await asyncio.sleep(0.5) 
+            # 💡 [손절 로직] 3번 재시도해도 실패하면 뒤에 TTS 안 뽑고 그 즉시 셧다운
+            if not p:
+                return await bot.send_message(chat_id, f"❌ 씬 {s['scene_no']} 이미지 생성 영구 실패. 이빨 빠진 영상을 막기 위해 작업을 강제 파기합니다.")
+            img_paths.append(p)
+            await asyncio.sleep(1.5) 
         await bot.send_message(chat_id, f"✅ 이미지 {len(img_paths)}/{len(bp['scenes'])}컷 완료")
 
         await bot.send_message(chat_id, "🎙️ [3/4] TTS 나레이션 생성 중...")
         aud_paths = []
         for s in bp["scenes"]:
             p = await generate_openai_tts(s["tts_text"], s["scene_no"])
-            if p: aud_paths.append(p)
+            if not p:
+                return await bot.send_message(chat_id, f"❌ 씬 {s['scene_no']} TTS 실패. 작업을 강제 파기합니다.")
+            aud_paths.append(p)
             await asyncio.sleep(0.5) 
         await bot.send_message(chat_id, f"✅ TTS {len(aud_paths)}/{len(bp['scenes'])}개 완료")
-
-        if not aud_paths:
-            return await bot.send_message(chat_id, "❌ TTS 전체 실패. 중단.")
 
         await bot.send_message(chat_id, "🎬 [4/4] 영상 렌더링 중... (수분 소요)")
         out_name = f"ssul_{int(time.time())}.mp4"
