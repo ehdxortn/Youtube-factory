@@ -1,7 +1,7 @@
 # 1. 파이썬 3.10 슬림 버전
 FROM python:3.10-slim
 
-# 2. 필수 조립 공구(build-essential) 및 영상 렌더링 OS 패키지, 한글 폰트 설치
+# 2. 필수 조립 공구 및 영상 렌더링 OS 패키지 설치
 RUN apt-get update && apt-get install -y \
     build-essential \
     imagemagick \
@@ -9,13 +9,14 @@ RUN apt-get update && apt-get install -y \
     fonts-nanum \
     && rm -rf /var/lib/apt/lists/*
 
-# 3. 에러의 원흉인 ImageMagick 보안 파일 강제 삭제 (자막 에러 원천 차단)
+# 3. 에러의 원흉인 ImageMagick 보안 파일 강제 삭제
 RUN rm -f /etc/ImageMagick-6/policy.xml || true
 
-# 4. 작업 폴더 세팅 및 파이썬 패키지 설치
+# 4. 작업 폴더 세팅 및 최신 pip 엔진 장착 (여기서 버벅임 완벽 해결)
 WORKDIR /app
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+RUN pip install --upgrade pip
+RUN pip install --no-cache-dir --prefer-binary -r requirements.txt
 
 # 5. 소스코드 복사 및 가동
 COPY . .
