@@ -1,23 +1,27 @@
-# 1. 파이썬 3.10 슬림 버전
+# 1. 파이썬 3.10 슬림 버전 기반
 FROM python:3.10-slim
 
-# 2. 필수 조립 공구 및 영상 렌더링 OS 패키지 설치
-RUN apt-get update && apt-get install -y \
-    build-essential \
+# 2. 작업 디렉토리 설정
+WORKDIR /app
+
+# 3. 필수 시스템 패키지, ImageMagick 및 한글 폰트(나눔) 설치
+# MoviePy의 TextClip 사용을 위해 ImageMagick의 보안 정책(policy.xml) 읽기 권한 수정 포함
+RUN apt-get update && apt-get install -y --no-install-recommends \
     imagemagick \
-    ffmpeg \
     fonts-nanum \
+    && sed -i 's/<policy domain="path" rights="none" pattern="@\*"/<policy domain="path" rights="read" pattern="@\*"/g' /etc/ImageMagick-6/policy.xml \
+    && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 
-# 3. 에러의 원흉인 ImageMagick 보안 파일 강제 삭제
-RUN rm -f /etc/ImageMagick-6/policy.xml || true
+# 4. ImageMagick 경로 환경변수 강제 설정
+ENV IMAGEMAGICK_BINARY=/usr/bin/convert
 
-# 4. 작업 폴더 세팅 및 최신 pip 엔진 장착 (여기서 버벅임 완벽 해결)
-WORKDIR /app
+# 5. 파이썬 패키지 설치
 COPY requirements.txt .
-RUN pip install --upgrade pip
-RUN pip install --no-cache-dir --prefer-binary -r requirements.txt
+RUN pip install --no-cache-dir -r requirements.txt
 
-# 5. 소스코드 복사 및 가동
+# 6. 소스 코드 전체 복사
 COPY . .
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8080"]
+
+# 7. 실행 명령어 (만약 메인 실행 파일 이름이 main.py가 아니라면 해당 부분만 형님 코드에 맞게 변경하십시오)
+CMD ["python", "main.py"]
