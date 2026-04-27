@@ -41,8 +41,11 @@ except ImportError:
     Langfuse = None
 
 from openai import AsyncOpenAI, OpenAI
-from moviepy.editor import ImageClip, ColorClip, AudioFileClip, TextClip, CompositeVideoClip, CompositeAudioClip, concatenate_videoclips
-import moviepy.audio.fx.all as afx
+def render_final_video(blueprint: dict, img_paths: list, audio_paths: list, out_name: str) -> str:
+    from moviepy.editor import ImageClip, ColorClip, AudioFileClip, TextClip, CompositeVideoClip, CompositeAudioClip, concatenate_videoclips
+    import moviepy.audio.fx.all as afx
+    logging.info("🎬 [연출 엔진] 컴포지션 시작")
+    # ... 나머지 동일
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaFileUpload
 from google.oauth2.credentials import Credentials
