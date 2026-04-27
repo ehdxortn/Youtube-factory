@@ -237,7 +237,7 @@ async def node_pd_harness(state: FactoryState) -> FactoryState:
       "scene_no": 1,
       "tts_text": "성우 나레이션",
       "subtitle": "압축 자막",
-      "image_prompt": "DALL-E 3 영문 프롬프트 (안전 규정 준수, 은유적 표현)",
+      "image_prompt": "DALL-E 3 영문 프롬프트. 반드시 아래 규칙 준수: 1) 사람 얼굴 표정으로만 감정 표현 2) 폭력/범죄 직접 묘사 금지 3) 배경과 소품으로만 갈등 암시 4) 항상 'safe for work, no violence' 태그 포함",
       "zoom_mode": "in"
     }}
   ]
@@ -293,14 +293,15 @@ async def generate_dalle_image(prompt: str, file_name: str, max_retries: int = 3
     safe_path = os.path.join("/tmp", file_name)
 
     for attempt in range(max_retries):
-        try:
-            res = await asyncio.wait_for(
-                openai_client.images.generate(
-                    model="dall-e-3", prompt=prompt,
-                    size="1792x1024", quality="hd", n=1
-                ),
-                timeout=60.0
-            )
+    try:
+        current_prompt = safe_prompts[min(attempt, len(safe_prompts)-1)]
+        res = await asyncio.wait_for(
+            openai_client.images.generate(
+                model="dall-e-3", prompt=current_prompt,
+                size="1792x1024", quality="hd", n=1
+            ),
+            timeout=60.0
+        )
             async with httpx.AsyncClient(timeout=30.0) as c:
                 img_data = await c.get(res.data[0].url)
                 with open(safe_path, 'wb') as f:
@@ -334,8 +335,9 @@ async def generate_openai_tts(text: str, scene_no: int) -> str:
         )
         # [수정] stream_to_file deprecated → content 직접 저장
         with open(safe_path, "wb") as f:
-            f.write(response.content)
-        return safe_path
+        for chunk in response.iter_bytes():
+            f.write(chunk)
+    return safe_path
 
     try:
         loop = asyncio.get_running_loop()
