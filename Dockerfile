@@ -9,7 +9,9 @@ WORKDIR /app
 RUN apt-get update && apt-get install -y --no-install-recommends \
     imagemagick \
     fonts-nanum \
-    && sed -i 's/<policy domain="path" rights="none" pattern="@\*"/<policy domain="path" rights="read" pattern="@\*"/g' /etc/ImageMagick-6/policy.xml \
+    && ([ -f /etc/ImageMagick-6/policy.xml ] \
+    && sed -i 's/rights="none"/rights="read|write"/g' /etc/ImageMagick-6/policy.xml \
+    || true) \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 
